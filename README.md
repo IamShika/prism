@@ -19,7 +19,7 @@ Needs Android 8.0 or newer.
 | ✅ | Basic player (play, pause, next, previous, seek) | Done in v0.1 |
 | ✅ | Filter songs by length | Done in v0.1 |
 | ✅ | Pitch and speed (independent of each other) | Done in v0.1 |
-| ✅ | Real-time reverb | Done in v0.1 (needs testing on more phones) |
+| ✅ | Real-time reverb with MAIN / TUNE panel and 5 presets | Done in v0.2 (our own reverb engine, works on every phone) |
 | ✅ | Accent colour themes (presets + your own colour) | Done in v0.1 |
 | ⬜ | Adjustable crossfade | Planned |
 | ⬜ | Create an album from picked songs (moves them into a new named folder) | Planned |
@@ -62,9 +62,22 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `data/SongRepository.kt` | Asks Android for the list of songs on the phone. |
 | `data/Song.kt` | A tiny description of one song (title, artist, length, location). |
 | `ui/Screens.kt` | Everything you see: song list, length slider, player, theme picker. |
+| `ui/ReverbPanel.kt` | The reverb screen: knobs, vertical sliders, preset menu. |
+| `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
+| `audio/ReverbAudioProcessor.kt` | Plugs the reverb into the player's sound pipeline. |
+| `audio/ReverbPresets.kt` | Small Room, Studio, Concert Hall, Cathedral, Dreamy. |
 | `ui/Theme.kt` | Turns the chosen accent colour into the app's colours. |
 
 A good way to learn: change something small and rebuild. For example, in `ui/Screens.kt` change the text `"Song length"` to anything you like, push to GitHub, and download the new APK.
+
+## Testing the reverb engine
+
+The reverb engine has automatic checks (does the tail last as long as the Decay knob says, does it stay stable
+with any knob settings, and so on). They need only Java and [Kotlin](https://kotlinlang.org/docs/command-line.html), not Android:
+
+```bash
+tools/reverb-test/run.sh
+```
 
 ## Building on your own computer (optional)
 

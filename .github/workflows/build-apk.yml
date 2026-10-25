@@ -44,18 +44,6 @@ jobs:
             echo "No signing secrets found. Using the temporary debug key."
           fi
 
-      # TEMPORARY: prints facts about the key (never the secrets) to help find mistakes.
-      # Safe to delete this whole step once signing works.
-      - name: Check signing key
-        if: env.KEYSTORE_PATH != ''
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-        run: |
-          echo "keystore file sha256: $(sha256sum "$KEYSTORE_PATH" | cut -d' ' -f1)"
-          echo "KEY_ALIAS secret length: ${#KEY_ALIAS} characters (expected 5 for 'prism')"
-          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" 2>&1 | grep -E "Keystore type|Your keystore contains|PrivateKeyEntry|trustedCertEntry|error|Exception" || true
-
       - name: Build release APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}

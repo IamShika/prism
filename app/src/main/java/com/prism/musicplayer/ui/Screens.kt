@@ -428,22 +428,8 @@ private fun NowPlayingSheet(state: PlayerUiState, vm: PlayerViewModel, onDismiss
                 onChange = vm::setPitch,
                 onReset = { vm.setPitch(0f) },
             )
-            ControlSlider(
-                label = "Reverb",
-                valueText = "${(state.reverb * 100).roundToInt()}%",
-                value = state.reverb,
-                range = 0f..1f,
-                steps = 0,
-                onChange = vm::setReverb,
-                onReset = { vm.setReverb(0f) },
-            )
-            if (!state.reverbAvailable) {
-                Text(
-                    text = "Reverb isn't supported on this phone.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Spacer(Modifier.height(20.dp))
+            ReverbPanel(params = state.reverb, vm = vm)
         }
     }
 }

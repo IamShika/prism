@@ -2,11 +2,9 @@ package com.prism.musicplayer
 
 import android.app.Application
 import android.content.Context
-import android.media.audiofx.EnvironmentalReverb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.AudioAttributes
-import androidx.media3.common.AuxEffectInfo
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -14,8 +12,18 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.RenderersFactory
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import com.prism.musicplayer.audio.ReverbAudioProcessor
+import com.prism.musicplayer.audio.ReverbParams
+import com.prism.musicplayer.audio.ReverbPresets
+import com.prism.musicplayer.audio.ReverbProcessorChain
 import com.prism.musicplayer.data.Song
 import com.prism.musicplayer.data.SongRepository
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,8 +52,7 @@ data class PlayerUiState(
     // Sound controls
     val speed: Float = 1f,
     val pitchSemitones: Float = 0f,
-    val reverb: Float = 0f,
-    val reverbAvailable: Boolean = true,
+    val reverb: ReverbParams = ReverbPresets.default,
     // Theme
     val accent: Int = DEFAULT_ACCENT,
 ) {
@@ -63,12 +70,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("prism_prefs", Context.MODE_PRIVATE)
 
     private val _state = MutableStateFlow(
-        PlayerUiState(accent = prefs.getInt(KEY_ACCENT, DEFAULT_ACCENT))
+        PlayerUiState(
+            accent = prefs.getInt(KEY_ACCENT, DEFAULT_ACCENT),
+            reverb = ReverbParams.decode(prefs.getString(KEY_REVERB, null)) ?: ReverbPresets.default,
+        )
     )
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
+    /** Our own reverb. It sits inside the audio pipeline, after the speed/pitch changer. */
+    private val reverbProcessor = ReverbAudioProcessor()
+
     /** The audio engine. */
-    private val player: ExoPlayer = ExoPlayer.Builder(app)
+    private val player: ExoPlayer = ExoPlayer.Builder(app, buildRenderersFactory(app))
         .setAudioAttributes(
             AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA)
@@ -80,9 +93,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         .setWakeMode(C.WAKE_MODE_LOCAL)
         .build()
 
-    private var reverbEffect: EnvironmentalReverb? = null
+    private var saveReverbJob: Job? = null
 
     init {
+        reverbProcessor.setParams(_state.value.reverb)
+
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _state.update { it.copy(isPlaying = isPlaying) }
@@ -93,8 +108,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             override fun onPlaybackStateChanged(playbackState: Int) = syncCurrent()
         })
 
-        setupReverb()
-
         // Update the progress bar 4 times per second while music is playing.
         viewModelScope.launch {
             while (true) {
@@ -103,6 +116,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 delay(250)
             }
+        }
+    }
+
+    /**
+     * Builds the audio part of the player by hand, so we can add our own reverb
+     * to the sound pipeline. (Music only: no video or subtitles needed.)
+     */
+    private fun buildRenderersFactory(context: Context): RenderersFactory {
+        val audioSink = DefaultAudioSink.Builder(context)
+            .setAudioProcessorChain(ReverbProcessorChain(reverbProcessor))
+            .build()
+        return RenderersFactory { handler, _, audioListener, _, _ ->
+            arrayOf<Renderer>(
+                MediaCodecAudioRenderer(context, MediaCodecSelector.DEFAULT, handler, audioListener, audioSink)
+            )
         }
     }
 
@@ -172,34 +200,28 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.playbackParameters = PlaybackParameters(s.speed, pitchFactor)
     }
 
-    fun setReverb(level: Float) {
-        _state.update { it.copy(reverb = level) }
-        val effect = reverbEffect ?: return
-        player.setAuxEffectInfo(AuxEffectInfo(effect.id, level))
+    // ----------------------------------------------------------------- reverb
+
+    /** Changes some of the reverb settings, e.g. `updateReverb { it.copy(size = 0.8f) }`. */
+    fun updateReverb(change: (ReverbParams) -> ReverbParams) {
+        _state.update { it.copy(reverb = change(it.reverb)) }
+        applyReverb()
     }
 
-    private fun setupReverb() {
-        try {
-            // Priority 0 and session 0 = a global "aux" effect that ExoPlayer can send audio into.
-            val fx = EnvironmentalReverb(0, 0)
-            // A medium concert-hall style room
-            fx.setRoomLevel((-1000).toShort())
-            fx.setRoomHFLevel((-600).toShort())
-            fx.setDecayTime(3000)
-            fx.setDecayHFRatio(700.toShort())
-            fx.setReflectionsLevel((-1200).toShort())
-            fx.setReflectionsDelay(20)
-            fx.setReverbLevel((-200).toShort())
-            fx.setReverbDelay(30)
-            fx.setDiffusion(1000.toShort())
-            fx.setDensity(1000.toShort())
-            fx.setEnabled(true)
-            reverbEffect = fx
-            player.setAuxEffectInfo(AuxEffectInfo(fx.id, 0f))
-        } catch (e: Exception) {
-            // Some phones don't offer this effect. The app keeps working without reverb.
-            reverbEffect = null
-            _state.update { it.copy(reverbAvailable = false) }
+    /** Loads a preset but keeps the on/off switch where it was. */
+    fun setReverbPreset(name: String) {
+        val preset = ReverbPresets.all.firstOrNull { it.first == name }?.second ?: return
+        updateReverb { current -> preset.copy(enabled = current.enabled) }
+    }
+
+    private fun applyReverb() {
+        val params = _state.value.reverb
+        reverbProcessor.setParams(params)
+        // Remember the settings, but wait until the knob stops moving before writing to storage.
+        saveReverbJob?.cancel()
+        saveReverbJob = viewModelScope.launch {
+            delay(400)
+            prefs.edit().putString(KEY_REVERB, params.encode()).apply()
         }
     }
 
@@ -231,11 +253,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         player.release()
-        reverbEffect?.release()
         super.onCleared()
     }
 
     private companion object {
         const val KEY_ACCENT = "accent_color"
+        const val KEY_REVERB = "reverb_params"
     }
 }
