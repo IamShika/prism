@@ -1,0 +1,13 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+.DS_Store
+
+# APKs are published through GitHub Releases, not committed to the repo
+*.apk
+*.aab
