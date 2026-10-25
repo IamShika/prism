@@ -26,7 +26,8 @@ android {
             create("release") {
                 storeFile = file(keystorePath)
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
+                // trim() ignores stray spaces or line breaks pasted into the secret
+                keyAlias = System.getenv("KEY_ALIAS")?.trim().takeUnless { it.isNullOrEmpty() } ?: "prism"
                 keyPassword = System.getenv("KEY_PASSWORD")
             }
         }
