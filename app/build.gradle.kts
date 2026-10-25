@@ -12,16 +12,35 @@ android {
         applicationId = "com.prism.musicplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        // On GitHub every build gets a higher number automatically, which Android needs
+        // before it lets a new version install over an old one.
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionName = "0.1.0"
+    }
+
+    // The permanent signing key is read from environment variables that the GitHub
+    // workflow fills in from your repository secrets. See README ("Signing").
+    val keystorePath: String? = System.getenv("KEYSTORE_PATH")
+    signingConfigs {
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so the APK is installable straight away.
-            // See README ("Signing") for how to switch to your own permanent key.
-            signingConfig = signingConfigs.getByName("debug")
+            // Permanent key when available, otherwise the temporary debug key.
+            signingConfig = if (keystorePath != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

@@ -72,7 +72,30 @@ Install [Android Studio](https://developer.android.com/studio), choose **Open**,
 
 ## Signing
 
-Release APKs are currently signed with a temporary debug key, so they install fine, but each GitHub build uses a different key. That means a user must **uninstall the old version before installing a newer one**. Before you tell many people about the app, create a permanent key and store it in GitHub Secrets so updates install cleanly over each other. This is a good next task.
+Android only lets a new version install over an old one if both were signed with the **same key**. Without your own key, each GitHub build uses a different temporary key, and users would have to uninstall the app before updating.
+
+**One-time setup (do this before your first public release):**
+
+1. Create the key on your own computer. It never goes into the repo:
+   ```bash
+   mkdir -p ~/prism-signing && cd ~/prism-signing
+   keytool -genkeypair -v -keystore prism-release.jks -alias prism \
+     -keyalg RSA -keysize 2048 -validity 10000
+   ```
+   Pick a strong password and remember it. If it asks for a separate key password, press Enter to reuse the same one.
+2. **Back up `prism-release.jks` and the password somewhere safe** (for example a password manager). If you lose them, nobody can update the app without uninstalling it first. Never upload the file to GitHub.
+3. On GitHub open the repo, then **Settings > Secrets and variables > Actions > New repository secret**, and add four secrets:
+
+   | Secret name | Value |
+   |---|---|
+   | `KEYSTORE_BASE64` | the output of `base64 -w0 prism-release.jks` (one very long line) |
+   | `KEYSTORE_PASSWORD` | the password you chose |
+   | `KEY_ALIAS` | `prism` |
+   | `KEY_PASSWORD` | the same password |
+
+4. Push any change. In the build log, the "Set up signing key" step should say *Using the permanent release key*.
+
+From then on every release APK uses your key, and every GitHub build gets a higher version number automatically, so users can simply install new versions over old ones.
 
 ## Roadmap
 
