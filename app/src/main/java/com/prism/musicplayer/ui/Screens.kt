@@ -1,13 +1,18 @@
 package com.prism.musicplayer.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +34,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,6 +45,8 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -112,12 +120,67 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
 
     var showPlayer by rememberSaveable { mutableStateOf(false) }
     var showTheme by rememberSaveable { mutableStateOf(false) }
+    var showAlbumDialog by rememberSaveable { mutableStateOf(false) }
+
+    // ---- album creator plumbing
+    val snackbar = remember { SnackbarHostState() }
+
+    // Android 11+: the system asks "Allow Prism to modify these files?" before songs can be moved.
+    val writeLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result -> vm.onWriteRequestResult(result.resultCode == Activity.RESULT_OK) }
+
+    // Android 9 and older: a normal storage permission is needed instead.
+    var pendingAlbumName by remember { mutableStateOf<String?>(null) }
+    val writePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { allowed ->
+        val name = pendingAlbumName
+        pendingAlbumName = null
+        if (allowed && name != null) vm.createAlbum(name) else vm.say("Cancelled. Nothing was moved.")
+    }
+
+    LaunchedEffect(Unit) {
+        vm.writeRequests.collect { writeLauncher.launch(IntentSenderRequest.Builder(it).build()) }
+    }
+    LaunchedEffect(Unit) {
+        vm.messages.collect { snackbar.showSnackbar(it) }
+    }
+
+    fun startAlbum(name: String) {
+        showAlbumDialog = false
+        val needsLegacyPermission = Build.VERSION.SDK_INT < 30 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        if (needsLegacyPermission) {
+            pendingAlbumName = name
+            writePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else {
+            vm.createAlbum(name)
+        }
+    }
+
+    // Back button leaves selection mode first
+    BackHandler(enabled = state.selecting) { vm.clearSelection() }
 
     val visibleSongs = remember(state.allSongs, state.minSec, state.maxSec) { state.visibleSongs }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        topBar = { TopBar(onTheme = { showTheme = true }) },
+        topBar = {
+            if (state.selecting) {
+                SelectionBar(
+                    count = state.selectedIds.size,
+                    busy = state.albumBusy,
+                    onCancel = vm::clearSelection,
+                    onSelectAll = vm::selectAllVisible,
+                    onCreate = { showAlbumDialog = true },
+                )
+            } else {
+                TopBar(onTheme = { showTheme = true })
+            }
+        },
+        snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             if (state.currentSong != null) {
                 MiniPlayer(state, onToggle = vm::togglePlayPause, onOpen = { showPlayer = true })
@@ -140,7 +203,9 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
                     current = state.currentSong,
                     loading = state.loading,
                     total = state.allSongs.size,
+                    selectedIds = state.selectedIds,
                     onPlay = vm::playSong,
+                    onToggleSelected = vm::toggleSelected,
                 )
             }
         }
@@ -148,6 +213,13 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
 
     if (showPlayer && state.currentSong != null) {
         NowPlayingSheet(state, vm, onDismiss = { showPlayer = false })
+    }
+    if (showAlbumDialog) {
+        CreateAlbumDialog(
+            count = state.selectedIds.size,
+            onCreate = { name -> startAlbum(name) },
+            onDismiss = { showAlbumDialog = false },
+        )
     }
     if (showTheme) {
         ThemeDialog(accent = state.accent, onPick = vm::setAccent, onDismiss = { showTheme = false })
@@ -183,6 +255,36 @@ private fun TopBar(onTheme: () -> Unit) {
     }
 }
 
+/** Replaces the top bar while songs are being picked for an album. */
+@Composable
+private fun SelectionBar(
+    count: Int,
+    busy: Boolean,
+    onCancel: () -> Unit,
+    onSelectAll: () -> Unit,
+    onCreate: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onCancel) { Text("Cancel") }
+        Text(
+            text = "$count selected",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.Center,
+        )
+        TextButton(onClick = onSelectAll) { Text("All") }
+        Button(onClick = onCreate, enabled = !busy) { Text("New album") }
+    }
+}
+
 // ------------------------------------------------------------- length filter
 
 @Composable
@@ -211,7 +313,7 @@ private fun LengthFilter(
             steps = 119, // 5-second steps
         )
         Text(
-            text = "Showing $shown of $total songs",
+            text = "Showing $shown of $total songs · press and hold a song to make an album",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -226,8 +328,11 @@ private fun SongList(
     current: Song?,
     loading: Boolean,
     total: Int,
+    selectedIds: Set<Long>,
     onPlay: (Song) -> Unit,
+    onToggleSelected: (Song) -> Unit,
 ) {
+    val selecting = selectedIds.isNotEmpty()
     when {
         loading -> CenteredMessage("Loading your music…")
         total == 0 -> CenteredMessage("No music found on this phone.\nCopy some songs onto it and reopen Prism.")
@@ -237,21 +342,41 @@ private fun SongList(
             contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp),
         ) {
             items(songs, key = { it.id }) { song ->
-                SongRow(song, isCurrent = song.id == current?.id, onClick = { onPlay(song) })
+                SongRow(
+                    song = song,
+                    isCurrent = song.id == current?.id,
+                    selecting = selecting,
+                    selected = song.id in selectedIds,
+                    onClick = { if (selecting) onToggleSelected(song) else onPlay(song) },
+                    onLongClick = { onToggleSelected(song) },
+                )
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SongRow(song: Song, isCurrent: Boolean, onClick: () -> Unit) {
+private fun SongRow(
+    song: Song,
+    isCurrent: Boolean,
+    selecting: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (selecting) {
+            Checkbox(checked = selected, onCheckedChange = null)
+            Spacer(Modifier.width(16.dp))
+        }
         Column(Modifier.weight(1f)) {
             Text(
                 text = song.title,

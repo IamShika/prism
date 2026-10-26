@@ -22,7 +22,7 @@ Needs Android 8.0 or newer.
 | ✅ | Real-time reverb with MAIN / TUNE panel and 5 presets | Done in v0.2 (our own reverb engine, works on every phone) |
 | ✅ | Accent colour themes (presets + your own colour) | Done in v0.1 |
 | ✅ | Adjustable crossfade (1 to 12 s, 3 fade curves, on manual skip and on auto-advance) | Done in v0.3 |
-| ⬜ | Create an album from picked songs (moves them into a new named folder) | Planned |
+| ✅ | Create an album: press and hold songs to pick them, name it, and they are moved into `Music/<name>/` | Done in v0.4 |
 | ⬜ | BPM detector | Planned |
 | ⬜ | Waveform view with real-time rewind and scrubbing | Planned |
 | ✅ | Background playback with notification, lock-screen and Bluetooth controls | Done in v0.3 |
@@ -71,6 +71,9 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `audio/AudioEngine.kt` | Owns the audio players. One engine for the whole app, shared by the screen, the overlay and the notification. |
 | `audio/CrossfadeLogic.kt` | Decides when and how to blend two songs. The helper player starts silently ahead of time so the old song never drops out. Pure maths, fully tested. |
 | `audio/CrossfadeController.kt` | Carries out those decisions on the real players. |
+| `data/AlbumNaming.kt` | The rules for album folder names (what is allowed, what happens to bad characters). Fully tested. |
+| `data/AlbumMover.kt` | Moves the picked songs into the album folder. |
+| `ui/AlbumDialog.kt` | The "New album" name box. |
 | `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
 | `audio/ReverbAudioProcessor.kt` | Plugs the reverb into the player's sound pipeline. |
@@ -89,6 +92,7 @@ moment, survive pausing, skipping and seeking. They need only Java and
 ```bash
 tools/reverb-test/run.sh
 tools/crossfade-test/run.sh
+tools/album-test/run.sh
 ```
 
 ## Building on your own computer (optional)
@@ -124,7 +128,7 @@ From then on every release APK uses your key, and every GitHub build gets a high
 
 ## Roadmap
 
-- **v0.4:** album creator, BPM detector (then the reverb "Tempo" sync can follow the song's beat).
+- **v0.4:** ~~album creator~~ (done), BPM detector (then the reverb "Tempo" sync can follow the song's beat).
 - **v0.5:** waveform view.
 - **v0.4:** real-time rewind and scrubbing (the BandLab-style audio stretch). This is the hardest feature and may need a custom audio engine.
 

@@ -2,7 +2,10 @@ package com.prism.musicplayer
 
 import android.app.Application
 import android.content.Context
+import android.content.IntentSender
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
@@ -15,13 +18,18 @@ import com.prism.musicplayer.audio.AudioEngine
 import com.prism.musicplayer.audio.CrossfadeSettings
 import com.prism.musicplayer.audio.ReverbParams
 import com.prism.musicplayer.audio.ReverbPresets
+import com.prism.musicplayer.data.AlbumMover
+import com.prism.musicplayer.data.AlbumNaming
 import com.prism.musicplayer.data.ExternalAudio
 import com.prism.musicplayer.data.Song
 import com.prism.musicplayer.data.SongRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -52,9 +60,15 @@ data class PlayerUiState(
     val pitchSemitones: Float = 0f,
     val reverb: ReverbParams = ReverbPresets.default,
     val crossfade: CrossfadeSettings = CrossfadeSettings(),
+    // Album creator
+    val selectedIds: Set<Long> = emptySet(),
+    val albumBusy: Boolean = false,
     // Theme
     val accent: Int = DEFAULT_ACCENT,
 ) {
+    /** True while the user is picking songs for an album. */
+    val selecting: Boolean get() = selectedIds.isNotEmpty()
+
     /** The songs that pass the length filter. */
     val visibleSongs: List<Song>
         get() = allSongs.filter { song ->
@@ -236,6 +250,87 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun setReverbPreset(name: String) {
         val preset = ReverbPresets.all.firstOrNull { it.first == name }?.second ?: return
         updateReverb { current -> preset.copy(enabled = current.enabled) }
+    }
+
+    // ------------------------------------------------------------------ albums
+
+    private class AlbumPlan(val folder: String, val songs: List<Song>)
+
+    /** The album waiting for the user's OK in Android's "allow Prism to modify these files?" dialog. */
+    private var plan: AlbumPlan? = null
+
+    private val _writeRequests = MutableSharedFlow<IntentSender>(extraBufferCapacity = 1)
+
+    /** The screen listens to this and shows Android's permission dialog. */
+    val writeRequests: SharedFlow<IntentSender> = _writeRequests.asSharedFlow()
+
+    private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
+
+    /** Short messages for the screen to show ("Moved 5 songs to ..."). */
+    val messages: SharedFlow<String> = _messages.asSharedFlow()
+
+    fun say(message: String) {
+        _messages.tryEmit(message)
+    }
+
+    fun toggleSelected(song: Song) {
+        _state.update {
+            val ids = it.selectedIds
+            it.copy(selectedIds = if (song.id in ids) ids - song.id else ids + song.id)
+        }
+    }
+
+    fun selectAllVisible() {
+        _state.update { it.copy(selectedIds = it.visibleSongs.map { song -> song.id }.toSet()) }
+    }
+
+    fun clearSelection() {
+        _state.update { it.copy(selectedIds = emptySet()) }
+    }
+
+    /** Moves the selected songs into a new folder called [rawName] inside Music. */
+    fun createAlbum(rawName: String) {
+        val current = _state.value
+        if (current.albumBusy) return
+        val folder = AlbumNaming.sanitize(rawName)
+        if (folder == null) {
+            say("Please type a name for the album.")
+            return
+        }
+        val songs = current.allSongs.filter { it.id in current.selectedIds }
+        if (songs.isEmpty()) return
+
+        plan = AlbumPlan(folder, songs)
+        if (Build.VERSION.SDK_INT >= 30) {
+            // Android 11+: one dialog where the user allows Prism to change these files.
+            val resolver = getApplication<Application>().contentResolver
+            val request = MediaStore.createWriteRequest(resolver, songs.map { it.uri })
+            _writeRequests.tryEmit(request.intentSender)
+        } else {
+            runMove()
+        }
+    }
+
+    /** Called with the user's answer to Android's dialog. */
+    fun onWriteRequestResult(allowed: Boolean) {
+        if (!allowed) {
+            plan = null
+            say("Cancelled. Nothing was moved.")
+            return
+        }
+        runMove()
+    }
+
+    private fun runMove() {
+        val album = plan ?: return
+        plan = null
+        _state.update { it.copy(albumBusy = true) }
+        viewModelScope.launch {
+            val result = AlbumMover.move(getApplication(), album.songs, album.folder)
+            _state.update { it.copy(albumBusy = false, selectedIds = if (result.moved > 0) emptySet() else it.selectedIds) }
+            say(AlbumNaming.summary(result.moved, result.failed, album.folder))
+            loadSongs()
+        }
     }
 
     // ------------------------------------------------------------------ theme
