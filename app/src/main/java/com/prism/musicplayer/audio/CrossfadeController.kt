@@ -23,7 +23,7 @@ class CrossfadeController(private val main: ExoPlayer, private val ghost: ExoPla
     private val handler = Handler(Looper.getMainLooper())
     private val tickRunnable = Runnable { tick() }
 
-    /** Skips that are waiting for the ghost to get ready. */
+    /** Skips that are waiting for the ghost to warm up. */
     private val pending = mutableListOf<() -> Unit>()
 
     var settings: CrossfadeSettings
@@ -40,8 +40,9 @@ class CrossfadeController(private val main: ExoPlayer, private val ghost: ExoPla
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                // pausing during a blend pauses both players
-                if (logic.phase == CrossfadeLogic.Phase.FADING) {
+                // pausing while the ghost is rolling or blending pauses both players
+                val phase = logic.phase
+                if (phase == CrossfadeLogic.Phase.FADING || phase == CrossfadeLogic.Phase.ROLLING) {
                     if (playWhenReady) ghost.play() else ghost.pause()
                 }
             }
@@ -94,6 +95,7 @@ class CrossfadeController(private val main: ExoPlayer, private val ghost: ExoPla
             positionMs = main.currentPosition,
             speed = main.playbackParameters.speed,
             ghostReady = ghost.playbackState == Player.STATE_READY,
+            ghostPlaying = ghost.isPlaying,
             ghostPositionMs = ghost.currentPosition,
         )
     }
@@ -109,11 +111,21 @@ class CrossfadeController(private val main: ExoPlayer, private val ghost: ExoPla
                 ghost.prepare()
             }
 
-            is CrossfadeLogic.Action.Start -> {
-                action.seekGhostToMs?.let { ghost.seekTo(it) }
-                ghost.volume = 1f
+            is CrossfadeLogic.Action.StartGhost -> {
+                // Start the old song on the ghost, silently. It warms up here, while main is
+                // still playing the same song out loud, so nobody hears the warm-up.
+                ghost.volume = 0f
+                ghost.seekTo(action.seekToMs)
                 ghost.play()
+            }
+
+            is CrossfadeLogic.Action.SeekGhost -> ghost.seekTo(action.toMs)
+
+            is CrossfadeLogic.Action.Start -> {
+                // The handover. The ghost is already playing, level with main, so only the volumes change.
                 main.volume = 0f
+                ghost.volume = 1f
+                if (!ghost.playWhenReady) ghost.play() // safety net, normally it is playing already
                 if (action.manual) runPending() else main.seekToNextMediaItem()
             }
 

@@ -69,7 +69,7 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `OverlayPlayerActivity.kt` | The window that holds that card. Android starts it when you open a music file with Prism. |
 | `PlaybackService.kt` | Keeps the music playing in the background and shows it in the notification and media controls. |
 | `audio/AudioEngine.kt` | Owns the audio players. One engine for the whole app, shared by the screen, the overlay and the notification. |
-| `audio/CrossfadeLogic.kt` | Decides when and how to blend two songs. Pure maths, fully tested. |
+| `audio/CrossfadeLogic.kt` | Decides when and how to blend two songs. The helper player starts silently ahead of time so the old song never drops out. Pure maths, fully tested. |
 | `audio/CrossfadeController.kt` | Carries out those decisions on the real players. |
 | `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
