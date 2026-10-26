@@ -91,8 +91,23 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
     ) { granted = it }
 
     // Ask for permission on first launch; load the songs as soon as we have it.
+    // Android 13+ also needs permission to show the music notification (the controls outside the app).
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* if refused, the music still plays, only the notification is missing */ }
+
     LaunchedEffect(granted) {
-        if (granted) vm.loadSongs() else permissionLauncher.launch(permission)
+        if (granted) {
+            vm.loadSongs()
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            permissionLauncher.launch(permission)
+        }
     }
 
     var showPlayer by rememberSaveable { mutableStateOf(false) }
@@ -429,13 +444,15 @@ private fun NowPlayingSheet(state: PlayerUiState, vm: PlayerViewModel, onDismiss
                 onReset = { vm.setPitch(0f) },
             )
             Spacer(Modifier.height(20.dp))
+            CrossfadePanel(settings = state.crossfade, vm = vm)
+            Spacer(Modifier.height(12.dp))
             ReverbPanel(params = state.reverb, vm = vm)
         }
     }
 }
 
 @Composable
-private fun SeekBar(state: PlayerUiState, onSeek: (Long) -> Unit) {
+internal fun SeekBar(state: PlayerUiState, onSeek: (Long) -> Unit) {
     var dragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableFloatStateOf(0f) }
 

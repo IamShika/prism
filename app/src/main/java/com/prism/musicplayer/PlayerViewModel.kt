@@ -2,25 +2,20 @@ package com.prism.musicplayer
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
-import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.Renderer
-import androidx.media3.exoplayer.RenderersFactory
-import androidx.media3.exoplayer.audio.DefaultAudioSink
-import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
-import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
-import com.prism.musicplayer.audio.ReverbAudioProcessor
+import com.prism.musicplayer.audio.AudioEngine
+import com.prism.musicplayer.audio.CrossfadeSettings
 import com.prism.musicplayer.audio.ReverbParams
 import com.prism.musicplayer.audio.ReverbPresets
-import com.prism.musicplayer.audio.ReverbProcessorChain
+import com.prism.musicplayer.data.ExternalAudio
 import com.prism.musicplayer.data.Song
 import com.prism.musicplayer.data.SongRepository
 import kotlinx.coroutines.Job
@@ -30,7 +25,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.ln
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 /** Longest value of the length filter slider. At this value there is no upper limit ("10:00+"). */
 const val MAX_FILTER_SEC = 600
@@ -49,10 +46,12 @@ data class PlayerUiState(
     val isPlaying: Boolean = false,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
+    val playError: String? = null,
     // Sound controls
     val speed: Float = 1f,
     val pitchSemitones: Float = 0f,
     val reverb: ReverbParams = ReverbPresets.default,
+    val crossfade: CrossfadeSettings = CrossfadeSettings(),
     // Theme
     val accent: Int = DEFAULT_ACCENT,
 ) {
@@ -69,44 +68,41 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("prism_prefs", Context.MODE_PRIVATE)
 
+    /** The sound engine is shared with the notification and the "open with" overlay. */
+    private val engine = AudioEngine.get(app)
+    private val player: Player = engine.player
+
     private val _state = MutableStateFlow(
         PlayerUiState(
             accent = prefs.getInt(KEY_ACCENT, DEFAULT_ACCENT),
-            reverb = ReverbParams.decode(prefs.getString(KEY_REVERB, null)) ?: ReverbPresets.default,
+            reverb = engine.reverb,
+            crossfade = engine.crossfade,
+            speed = player.playbackParameters.speed,
+            pitchSemitones = semitonesOf(player.playbackParameters.pitch),
+            isPlaying = player.isPlaying,
         )
     )
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
-    /** Our own reverb. It sits inside the audio pipeline, after the speed/pitch changer. */
-    private val reverbProcessor = ReverbAudioProcessor()
-
-    /** The audio engine. */
-    private val player: ExoPlayer = ExoPlayer.Builder(app, buildRenderersFactory(app))
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                .build(),
-            /* handleAudioFocus = */ true,
-        )
-        .setHandleAudioBecomingNoisy(true) // pause when headphones are unplugged
-        .setWakeMode(C.WAKE_MODE_LOCAL)
-        .build()
-
     private var saveReverbJob: Job? = null
 
+    private val listener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            _state.update { it.copy(isPlaying = isPlaying) }
+        }
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = syncCurrent()
+
+        override fun onPlaybackStateChanged(playbackState: Int) = syncCurrent()
+
+        override fun onPlayerError(error: PlaybackException) {
+            _state.update { it.copy(playError = "This file can't be played.") }
+        }
+    }
+
     init {
-        reverbProcessor.setParams(_state.value.reverb)
-
-        player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                _state.update { it.copy(isPlaying = isPlaying) }
-            }
-
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = syncCurrent()
-
-            override fun onPlaybackStateChanged(playbackState: Int) = syncCurrent()
-        })
+        player.addListener(listener)
+        syncCurrent() // the music may already be playing (started from the notification or the overlay)
 
         // Update the progress bar 4 times per second while music is playing.
         viewModelScope.launch {
@@ -116,21 +112,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 delay(250)
             }
-        }
-    }
-
-    /**
-     * Builds the audio part of the player by hand, so we can add our own reverb
-     * to the sound pipeline. (Music only: no video or subtitles needed.)
-     */
-    private fun buildRenderersFactory(context: Context): RenderersFactory {
-        val audioSink = DefaultAudioSink.Builder(context)
-            .setAudioProcessorChain(ReverbProcessorChain(reverbProcessor))
-            .build()
-        return RenderersFactory { handler, _, audioListener, _, _ ->
-            arrayOf<Renderer>(
-                MediaCodecAudioRenderer(context, MediaCodecSelector.DEFAULT, handler, audioListener, audioSink)
-            )
         }
     }
 
@@ -155,10 +136,35 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val list = _state.value.visibleSongs
         val index = list.indexOfFirst { it.id == song.id }
         if (index < 0) return
+        _state.update { it.copy(playError = null) }
         player.setMediaItems(list.map { it.toMediaItem() }, index, 0L)
         player.prepare()
         player.play()
+        engine.startService()
         syncCurrent()
+    }
+
+    /** Plays a music file that another app asked us to open. */
+    fun playExternal(uri: Uri) {
+        viewModelScope.launch {
+            _state.update { it.copy(playError = null) }
+            val opened = try {
+                ExternalAudio.resolve(getApplication(), uri)
+            } catch (e: Exception) {
+                _state.update { it.copy(playError = "Couldn't open this file.") }
+                return@launch
+            }
+            val item = MediaItem.Builder()
+                .setMediaId(opened.mediaId)
+                .setUri(opened.uri)
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(opened.title).setArtist(opened.artist).build())
+                .build()
+            player.setMediaItem(item)
+            player.prepare()
+            player.play()
+            engine.startService()
+            syncCurrent()
+        }
     }
 
     fun togglePlayPause() {
@@ -197,7 +203,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         // 12 semitones = one octave = double the frequency
         val pitchFactor = 2.0.pow(s.pitchSemitones / 12.0).toFloat()
-        player.playbackParameters = PlaybackParameters(s.speed, pitchFactor)
+        engine.setSpeedAndPitch(s.speed, pitchFactor)
+    }
+
+    private fun semitonesOf(pitchFactor: Float): Float =
+        (12.0 * ln(pitchFactor.toDouble()) / ln(2.0)).roundToInt().toFloat()
+
+    // --------------------------------------------------------------- crossfade
+
+    /** Changes some crossfade settings, e.g. `updateCrossfade { it.copy(seconds = 8) }`. */
+    fun updateCrossfade(change: (CrossfadeSettings) -> CrossfadeSettings) {
+        val updated = change(_state.value.crossfade)
+        _state.update { it.copy(crossfade = updated) }
+        engine.setCrossfade(updated)
     }
 
     // ----------------------------------------------------------------- reverb
@@ -205,24 +223,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     /** Changes some of the reverb settings, e.g. `updateReverb { it.copy(size = 0.8f) }`. */
     fun updateReverb(change: (ReverbParams) -> ReverbParams) {
         _state.update { it.copy(reverb = change(it.reverb)) }
-        applyReverb()
+        engine.setReverb(_state.value.reverb)
+        // Remember the settings, but wait until the knob stops moving before writing to storage.
+        saveReverbJob?.cancel()
+        saveReverbJob = viewModelScope.launch {
+            delay(400)
+            engine.saveReverb()
+        }
     }
 
     /** Loads a preset but keeps the on/off switch where it was. */
     fun setReverbPreset(name: String) {
         val preset = ReverbPresets.all.firstOrNull { it.first == name }?.second ?: return
         updateReverb { current -> preset.copy(enabled = current.enabled) }
-    }
-
-    private fun applyReverb() {
-        val params = _state.value.reverb
-        reverbProcessor.setParams(params)
-        // Remember the settings, but wait until the knob stops moving before writing to storage.
-        saveReverbJob?.cancel()
-        saveReverbJob = viewModelScope.launch {
-            delay(400)
-            prefs.edit().putString(KEY_REVERB, params.encode()).apply()
-        }
     }
 
     // ------------------------------------------------------------------ theme
@@ -236,9 +249,20 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Copies the player's current song / duration / position into the UI state. */
     private fun syncCurrent() {
-        val id = player.currentMediaItem?.mediaId?.toLongOrNull()
-        val song = id?.let { songId -> _state.value.allSongs.firstOrNull { it.id == songId } }
-        val duration = if (player.duration == C.TIME_UNSET) song?.durationMs ?: 0L else player.duration
+        val item = player.currentMediaItem
+        val duration = when {
+            player.duration != C.TIME_UNSET -> player.duration
+            else -> item?.mediaMetadata?.durationMs ?: 0L
+        }
+        val song = item?.let { current ->
+            Song(
+                id = current.mediaId.toLongOrNull() ?: -1L,
+                title = current.mediaMetadata.title?.toString() ?: "Unknown title",
+                artist = current.mediaMetadata.artist?.toString() ?: "Unknown artist",
+                durationMs = duration,
+                uri = current.localConfiguration?.uri ?: Uri.EMPTY,
+            )
+        }
         _state.update {
             it.copy(currentSong = song, durationMs = duration, positionMs = player.currentPosition)
         }
@@ -248,16 +272,23 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         MediaItem.Builder()
             .setMediaId(id.toString())
             .setUri(uri)
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).build())
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(artist)
+                    .setDurationMs(durationMs)
+                    .build()
+            )
             .build()
 
     override fun onCleared() {
-        player.release()
+        // The player is NOT released: it belongs to the app and keeps playing in the background.
+        player.removeListener(listener)
+        engine.saveReverb()
         super.onCleared()
     }
 
     private companion object {
         const val KEY_ACCENT = "accent_color"
-        const val KEY_REVERB = "reverb_params"
     }
 }

@@ -21,11 +21,12 @@ Needs Android 8.0 or newer.
 | ✅ | Pitch and speed (independent of each other) | Done in v0.1 |
 | ✅ | Real-time reverb with MAIN / TUNE panel and 5 presets | Done in v0.2 (our own reverb engine, works on every phone) |
 | ✅ | Accent colour themes (presets + your own colour) | Done in v0.1 |
-| ⬜ | Adjustable crossfade | Planned |
+| ✅ | Adjustable crossfade (1 to 12 s, 3 fade curves, on manual skip and on auto-advance) | Done in v0.3 |
 | ⬜ | Create an album from picked songs (moves them into a new named folder) | Planned |
 | ⬜ | BPM detector | Planned |
 | ⬜ | Waveform view with real-time rewind and scrubbing | Planned |
-| ⬜ | Background playback with notification and lock-screen controls | Planned |
+| ✅ | Background playback with notification, lock-screen and Bluetooth controls | Done in v0.3 |
+| ✅ | "Open with Prism" from a file manager: a small player pops up over the file manager and plays the file right there | Done in v0.3 |
 
 ## Publishing this on GitHub (step by step)
 
@@ -63,6 +64,14 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `data/Song.kt` | A tiny description of one song (title, artist, length, location). |
 | `ui/Screens.kt` | Everything you see: song list, length slider, player, theme picker. |
 | `ui/ReverbPanel.kt` | The reverb screen: knobs, vertical sliders, preset menu. |
+| `ui/CrossfadePanel.kt` | The crossfade settings: switch, curve graph, duration. |
+| `ui/OverlayPlayer.kt` | The small player card that pops up over other apps. |
+| `OverlayPlayerActivity.kt` | The window that holds that card. Android starts it when you open a music file with Prism. |
+| `PlaybackService.kt` | Keeps the music playing in the background and shows it in the notification and media controls. |
+| `audio/AudioEngine.kt` | Owns the audio players. One engine for the whole app, shared by the screen, the overlay and the notification. |
+| `audio/CrossfadeLogic.kt` | Decides when and how to blend two songs. Pure maths, fully tested. |
+| `audio/CrossfadeController.kt` | Carries out those decisions on the real players. |
+| `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
 | `audio/ReverbAudioProcessor.kt` | Plugs the reverb into the player's sound pipeline. |
 | `audio/ReverbPresets.kt` | Small Room, Studio, Concert Hall, Cathedral, Dreamy. |
@@ -70,13 +79,16 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 
 A good way to learn: change something small and rebuild. For example, in `ui/Screens.kt` change the text `"Song length"` to anything you like, push to GitHub, and download the new APK.
 
-## Testing the reverb engine
+## Automatic tests
 
-The reverb engine has automatic checks (does the tail last as long as the Decay knob says, does it stay stable
-with any knob settings, and so on). They need only Java and [Kotlin](https://kotlinlang.org/docs/command-line.html), not Android:
+The reverb engine and the crossfade timing have automatic checks. For the reverb: does the tail last as long as the
+Decay knob says, does it stay stable with any knob settings. For the crossfade: does the blend start at the right
+moment, survive pausing, skipping and seeking. They need only Java and
+[Kotlin](https://kotlinlang.org/docs/command-line.html), not Android:
 
 ```bash
 tools/reverb-test/run.sh
+tools/crossfade-test/run.sh
 ```
 
 ## Building on your own computer (optional)
@@ -112,8 +124,8 @@ From then on every release APK uses your key, and every GitHub build gets a high
 
 ## Roadmap
 
-- **v0.2:** background playback service with notification, crossfade, album creator.
-- **v0.3:** BPM detector, waveform view.
+- **v0.4:** album creator, BPM detector (then the reverb "Tempo" sync can follow the song's beat).
+- **v0.5:** waveform view.
 - **v0.4:** real-time rewind and scrubbing (the BandLab-style audio stretch). This is the hardest feature and may need a custom audio engine.
 
 ## Contributing

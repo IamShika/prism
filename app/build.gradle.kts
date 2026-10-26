@@ -73,4 +73,6 @@ dependencies {
     // Audio engine (ExoPlayer): playback, speed, pitch and effects
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
+    // Notification, lock screen and Bluetooth controls (MediaSession)
+    implementation("androidx.media3:media3-session:1.4.1")
 }

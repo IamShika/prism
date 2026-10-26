@@ -3,4 +3,13 @@
     <style name="Theme.Prism" parent="android:Theme.DeviceDefault.NoActionBar">
         <item name="android:windowBackground">@color/prism_background</item>
     </style>
+
+    <!-- See-through window: the app you came from stays visible behind the small player -->
+    <style name="Theme.Prism.Overlay" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Activity</item>
+    </style>
 </resources>
