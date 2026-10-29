@@ -235,6 +235,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(arranging = false) }
     }
 
+    /** Saves the order the user dragged the songs into. [ids] is the whole list being arranged. */
+    fun setOrder(ids: List<Long>) {
+        val key = _state.value.scopeFolder ?: ""
+        saveOrder(key, ids)
+    }
+
     /** Moves one song up, down or to the top of the list being arranged. */
     fun moveSong(song: Song, how: Move) {
         val current = _state.value

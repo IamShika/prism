@@ -417,7 +417,7 @@ private fun ArrangeBar(onDone: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "Arranging. Use ▲ ▼ and Top to move songs. Saved for this list.",
+                text = "Arranging. Drag the three lines on the right to move a song. Saved for this list.",
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.weight(1f).padding(vertical = 8.dp),
             )
@@ -445,18 +445,24 @@ private fun SongsPage(
                 onChange = vm::setLengthFilter,
             )
         }
-        SongList(
-            songs = songs,
-            current = state.currentSong,
-            loading = state.loading,
-            total = totalInScope,
-            query = state.query,
-            selectedIds = state.selectedIds,
-            arranging = arranging,
-            onPlay = { song -> vm.playSong(song, songs) },
-            onToggleSelected = vm::toggleSelected,
-            onMove = vm::moveSong,
-        )
+        if (arranging) {
+            ArrangeList(
+                songs = songs,
+                onReorder = vm::setOrder,
+                onTop = { song -> vm.moveSong(song, Move.TOP) },
+            )
+        } else {
+            SongList(
+                songs = songs,
+                current = state.currentSong,
+                loading = state.loading,
+                total = totalInScope,
+                query = state.query,
+                selectedIds = state.selectedIds,
+                onPlay = { song -> vm.playSong(song, songs) },
+                onToggleSelected = vm::toggleSelected,
+            )
+        }
     }
 }
 
@@ -587,10 +593,8 @@ private fun SongList(
     total: Int,
     query: String,
     selectedIds: Set<Long>,
-    arranging: Boolean,
     onPlay: (Song) -> Unit,
     onToggleSelected: (Song) -> Unit,
-    onMove: (Song, Move) -> Unit,
 ) {
     val selecting = selectedIds.isNotEmpty()
     when {
@@ -608,10 +612,8 @@ private fun SongList(
                     isCurrent = song.id == current?.id,
                     selecting = selecting,
                     selected = song.id in selectedIds,
-                    arranging = arranging,
                     onClick = { if (selecting) onToggleSelected(song) else onPlay(song) },
                     onLongClick = { onToggleSelected(song) },
-                    onMove = { how -> onMove(song, how) },
                 )
             }
         }
@@ -625,16 +627,14 @@ private fun SongRow(
     isCurrent: Boolean,
     selecting: Boolean,
     selected: Boolean,
-    arranging: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onMove: (Move) -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent)
-            .combinedClickable(enabled = !arranging, onClick = onClick, onLongClick = onLongClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -659,25 +659,11 @@ private fun SongRow(
             )
         }
         Spacer(Modifier.width(12.dp))
-        if (arranging) {
-            // simple move buttons: no dragging, so it works the same on every phone
-            listOf("▲" to Move.UP, "▼" to Move.DOWN, "Top" to Move.TOP).forEach { (label, how) ->
-                Text(
-                    text = label,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .clickable { onMove(how) }
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                )
-            }
-        } else {
-            Text(
-                text = formatTime(song.durationMs),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text(
+            text = formatTime(song.durationMs),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

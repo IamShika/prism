@@ -25,7 +25,7 @@ Needs Android 8.0 or newer.
 | ✅ | Create an album: press and hold songs to pick them, name it, and they are moved into `Music/<name>/` | Done in v0.4 |
 | ✅ | Albums tab: every folder with music is an album; open one to play just that album (also opens straight after you create one) | Done in v0.5 |
 | ✅ | Start and end markers per song: skip the silence before or after the music. Saved for each song | Done in v0.5 |
-| ✅ | Search, sorting (A to Z, newest, biggest and more) and your own hand-arranged order, saved for each album | Done in v0.6 |
+| ✅ | Search, sorting (A to Z, newest, biggest and more) and your own hand-arranged order (drag to move), saved for each album | Done in v0.6 |
 | ✅ | Swipe between All music and Albums; the player bar is always visible | Done in v0.6 |
 | ⬜ | BPM detector | Planned |
 | ⬜ | Waveform view with real-time rewind and scrubbing | Planned |
@@ -82,6 +82,8 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `data/MarkerRepository.kt` | Remembers each song's markers on the phone. |
 | `ui/MarkerPanel.kt` | The "Start and end markers" panel in the player. |
 | `data/LibraryOrdering.kt` | Search, the sort orders and rearranging songs, and how your own order is saved. Fully tested. |
+| `ui/ArrangeList.kt` | The drag-to-reorder song list. |
+| `ui/DragMath.kt` | The maths of dragging a row to a new place. Fully tested. |
 | `data/AlbumFolder.kt` | A folder with music in it (an album). |
 | `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
@@ -104,6 +106,7 @@ tools/crossfade-test/run.sh
 tools/album-test/run.sh
 tools/marker-test/run.sh
 tools/library-test/run.sh
+tools/drag-test/run.sh
 ```
 
 ## Building on your own computer (optional)
