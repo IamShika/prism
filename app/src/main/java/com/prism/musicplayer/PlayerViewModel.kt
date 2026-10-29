@@ -18,11 +18,15 @@ import com.prism.musicplayer.audio.AudioEngine
 import com.prism.musicplayer.audio.CrossfadeSettings
 import com.prism.musicplayer.audio.ReverbParams
 import com.prism.musicplayer.audio.ReverbPresets
+import com.prism.musicplayer.data.AlbumFolder
 import com.prism.musicplayer.data.AlbumMover
 import com.prism.musicplayer.data.AlbumNaming
 import com.prism.musicplayer.data.ExternalAudio
+import com.prism.musicplayer.data.MarkerRepository
 import com.prism.musicplayer.data.Song
 import com.prism.musicplayer.data.SongRepository
+import com.prism.musicplayer.data.TrackMarker
+import com.prism.musicplayer.data.TrackMarkers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -42,6 +46,12 @@ const val MAX_FILTER_SEC = 600
 
 val DEFAULT_ACCENT: Int = 0xFF8B7CFF.toInt()
 
+/** Which list the home screen shows. */
+enum class LibraryView { SONGS, ALBUMS }
+
+/** A short message for the screen. If [openFolderSuffix] is set, the message offers an "Open" button for that folder. */
+class UiMessage(val text: String, val openFolderSuffix: String? = null)
+
 /** Everything the screen needs to know, in one place. The UI just draws this. */
 data class PlayerUiState(
     val allSongs: List<Song> = emptyList(),
@@ -60,6 +70,13 @@ data class PlayerUiState(
     val pitchSemitones: Float = 0f,
     val reverb: ReverbParams = ReverbPresets.default,
     val crossfade: CrossfadeSettings = CrossfadeSettings(),
+    // Start / end markers of the current song
+    val markers: TrackMarker = TrackMarker(),
+    val fullDurationMs: Long = 0L,  // the whole file, ignoring markers
+    val clipStartMs: Long = 0L,     // where the player is actually starting (position 0 of the seek bar = this spot in the file)
+    // Library
+    val view: LibraryView = LibraryView.SONGS,
+    val openFolder: String? = null,
     // Album creator
     val selectedIds: Set<Long> = emptySet(),
     val albumBusy: Boolean = false,
@@ -69,18 +86,28 @@ data class PlayerUiState(
     /** True while the user is picking songs for an album. */
     val selecting: Boolean get() = selectedIds.isNotEmpty()
 
-    /** The songs that pass the length filter. */
+    /** The songs that pass the length filter (and are in the opened album, if one is open). */
     val visibleSongs: List<Song>
         get() = allSongs.filter { song ->
             val sec = song.durationMs / 1000
-            sec >= minSec && (maxSec >= MAX_FILTER_SEC || sec <= maxSec)
+            sec >= minSec && (maxSec >= MAX_FILTER_SEC || sec <= maxSec) &&
+                (openFolder == null || song.folderPath == openFolder)
         }
+
+    /** Every folder with music in it, for the Albums list. */
+    val albums: List<AlbumFolder>
+        get() = allSongs
+            .filter { it.folderPath.isNotEmpty() }
+            .groupBy { it.folderPath }
+            .map { (path, songs) -> AlbumFolder(path, songs.size, songs.sumOf { it.durationMs }) }
+            .sortedBy { it.name.lowercase() }
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("prism_prefs", Context.MODE_PRIVATE)
+    private val markerRepo = MarkerRepository.get(app)
 
     /** The sound engine is shared with the notification and the "open with" overlay. */
     private val engine = AudioEngine.get(app)
@@ -141,6 +168,25 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setLengthFilter(minSec: Int, maxSec: Int) {
         _state.update { it.copy(minSec = minSec, maxSec = maxSec) }
+    }
+
+    fun setView(view: LibraryView) {
+        // leaving the Albums list for Songs shows every song again
+        _state.update { it.copy(view = view, openFolder = if (view == LibraryView.SONGS) null else it.openFolder) }
+    }
+
+    fun openAlbum(path: String) {
+        _state.update { it.copy(view = LibraryView.ALBUMS, openFolder = path) }
+    }
+
+    fun closeAlbum() {
+        _state.update { it.copy(openFolder = null) }
+    }
+
+    /** Opens the album whose folder ends with [suffix], e.g. "/Music/Road Trip". Used by the "Open" button. */
+    fun openAlbumBySuffix(suffix: String) {
+        val path = _state.value.albums.firstOrNull { it.path.endsWith(suffix, ignoreCase = true) }?.path ?: return
+        openAlbum(path)
     }
 
     // --------------------------------------------------------------- playback
@@ -252,6 +298,86 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         updateReverb { current -> preset.copy(enabled = current.enabled) }
     }
 
+    // ------------------------------------------------------------ start/end markers
+
+    private enum class Preview { START, END }
+
+    private var markerApplyJob: Job? = null
+
+    /** Makes the current spot the start of the song. */
+    fun setStartHere() = editMarkers(Preview.START) { m, full ->
+        TrackMarkers.withStart(m, _state.value.clipStartMs + player.currentPosition, full)
+    }
+
+    /** Makes the current spot the end of the song. */
+    fun setEndHere() = editMarkers(Preview.END) { m, full ->
+        TrackMarkers.withEnd(m, _state.value.clipStartMs + player.currentPosition, full)
+    }
+
+    fun nudgeStart(deltaMs: Long) = editMarkers(Preview.START) { m, full ->
+        TrackMarkers.withStart(m, m.startMs + deltaMs, full)
+    }
+
+    fun nudgeEnd(deltaMs: Long) = editMarkers(Preview.END) { m, full ->
+        TrackMarkers.withEnd(m, m.effectiveEnd(full) + deltaMs, full)
+    }
+
+    fun clearMarkers() = editMarkers(Preview.START) { _, _ -> TrackMarker() }
+
+    /** Jumps to a few seconds before the end, to hear where the song will stop. */
+    fun previewEnd() {
+        player.seekTo((_state.value.durationMs - PREVIEW_TAIL_MS).coerceAtLeast(0L))
+    }
+
+    private fun editMarkers(preview: Preview, change: (TrackMarker, Long) -> TrackMarker) {
+        val current = _state.value
+        val song = current.currentSong ?: return
+        if (song.id < 0 || current.fullDurationMs <= 0L) return // songs opened from other apps have no saved markers
+        val updated = change(current.markers, current.fullDurationMs)
+        if (updated == current.markers) return
+
+        markerRepo.set(song.id, updated)            // saved right away
+        _state.update { it.copy(markers = updated) } // the numbers on screen change right away
+
+        // The player is told once the buttons stop being tapped, because it restarts the song when it hears.
+        markerApplyJob?.cancel()
+        markerApplyJob = viewModelScope.launch {
+            delay(500)
+            applyMarkers(song.id, updated, preview)
+        }
+    }
+
+    /** Tells the player about new markers: it will only play the part between start and end. */
+    private fun applyMarkers(songId: Long, markers: TrackMarker, preview: Preview) {
+        val text = songId.toString()
+        var currentChanged = false
+        for (i in 0 until player.mediaItemCount) {
+            val item = player.getMediaItemAt(i)
+            if (item.mediaId != text) continue
+            if (i == player.currentMediaItemIndex) currentChanged = true
+            player.replaceMediaItem(i, item.withMarkers(markers))
+        }
+        // Replacing the current song restarts it at the new start. After changing the END, jump to the
+        // last seconds instead, because that is what the user wants to hear.
+        if (currentChanged && preview == Preview.END) {
+            val length = markers.clipLengthMs(_state.value.fullDurationMs)
+            player.seekTo((length - PREVIEW_TAIL_MS).coerceAtLeast(0L))
+        }
+        syncCurrent()
+    }
+
+    private fun MediaItem.withMarkers(markers: TrackMarker): MediaItem {
+        val clip = if (markers.isSet) {
+            MediaItem.ClippingConfiguration.Builder()
+                .setStartPositionMs(markers.startMs)
+                .setEndPositionMs(if (markers.endMs > 0L) markers.endMs else C.TIME_END_OF_SOURCE)
+                .build()
+        } else {
+            MediaItem.ClippingConfiguration.UNSET
+        }
+        return buildUpon().setClippingConfiguration(clip).build()
+    }
+
     // ------------------------------------------------------------------ albums
 
     private class AlbumPlan(val folder: String, val songs: List<Song>)
@@ -264,13 +390,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     /** The screen listens to this and shows Android's permission dialog. */
     val writeRequests: SharedFlow<IntentSender> = _writeRequests.asSharedFlow()
 
-    private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    private val _messages = MutableSharedFlow<UiMessage>(extraBufferCapacity = 4)
 
     /** Short messages for the screen to show ("Moved 5 songs to ..."). */
-    val messages: SharedFlow<String> = _messages.asSharedFlow()
+    val messages: SharedFlow<UiMessage> = _messages.asSharedFlow()
 
-    fun say(message: String) {
-        _messages.tryEmit(message)
+    fun say(message: String, openFolderSuffix: String? = null) {
+        _messages.tryEmit(UiMessage(message, openFolderSuffix))
     }
 
     fun toggleSelected(song: Song) {
@@ -328,7 +454,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = AlbumMover.move(getApplication(), album.songs, album.folder)
             _state.update { it.copy(albumBusy = false, selectedIds = if (result.moved > 0) emptySet() else it.selectedIds) }
-            say(AlbumNaming.summary(result.moved, result.failed, album.folder))
+            // after a successful move the message offers to open the new album
+            val suffix = if (result.moved > 0) "/${AlbumNaming.BASE_FOLDER}/${album.folder}" else null
+            say(AlbumNaming.summary(result.moved, result.failed, album.folder), suffix)
             loadSongs()
         }
     }
@@ -358,8 +486,20 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 uri = current.localConfiguration?.uri ?: Uri.EMPTY,
             )
         }
+        val songId = item?.mediaId?.toLongOrNull()
+        val clipStart = item?.clippingConfiguration?.startPositionMs ?: 0L
+        val markers = if (songId != null && songId >= 0) markerRepo.get(songId) else TrackMarker()
+        val full = item?.mediaMetadata?.durationMs ?: (duration + clipStart)
         _state.update {
-            it.copy(currentSong = song, durationMs = duration, positionMs = player.currentPosition)
+            it.copy(
+                currentSong = song,
+                durationMs = duration,
+                positionMs = player.currentPosition,
+                // markers are saved the moment they change, so the saved copy is always up to date
+                markers = markers,
+                fullDurationMs = full,
+                clipStartMs = clipStart,
+            )
         }
     }
 
@@ -375,6 +515,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     .build()
             )
             .build()
+            .withMarkers(markerRepo.get(id))
 
     override fun onCleared() {
         // The player is NOT released: it belongs to the app and keeps playing in the background.
@@ -385,5 +526,6 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val KEY_ACCENT = "accent_color"
+        const val PREVIEW_TAIL_MS = 3000L
     }
 }

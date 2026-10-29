@@ -23,6 +23,8 @@ Needs Android 8.0 or newer.
 | ✅ | Accent colour themes (presets + your own colour) | Done in v0.1 |
 | ✅ | Adjustable crossfade (1 to 12 s, 3 fade curves, on manual skip and on auto-advance) | Done in v0.3 |
 | ✅ | Create an album: press and hold songs to pick them, name it, and they are moved into `Music/<name>/` | Done in v0.4 |
+| ✅ | Albums tab: every folder with music is an album; open one to play just that album (also opens straight after you create one) | Done in v0.5 |
+| ✅ | Start and end markers per song: skip the silence before or after the music. Saved for each song | Done in v0.5 |
 | ⬜ | BPM detector | Planned |
 | ⬜ | Waveform view with real-time rewind and scrubbing | Planned |
 | ✅ | Background playback with notification, lock-screen and Bluetooth controls | Done in v0.3 |
@@ -74,6 +76,9 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `data/AlbumNaming.kt` | The rules for album folder names (what is allowed, what happens to bad characters). Fully tested. |
 | `data/AlbumMover.kt` | Moves the picked songs into the album folder. |
 | `ui/AlbumDialog.kt` | The "New album" name box. |
+| `data/TrackMarker.kt` | The start/end marker rules and how they are saved. Fully tested. |
+| `data/MarkerRepository.kt` | Remembers each song's markers on the phone. |
+| `ui/MarkerPanel.kt` | The "Start and end markers" panel in the player. |
 | `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
 | `audio/ReverbAudioProcessor.kt` | Plugs the reverb into the player's sound pipeline. |
@@ -93,6 +98,7 @@ moment, survive pausing, skipping and seeking. They need only Java and
 tools/reverb-test/run.sh
 tools/crossfade-test/run.sh
 tools/album-test/run.sh
+tools/marker-test/run.sh
 ```
 
 ## Building on your own computer (optional)

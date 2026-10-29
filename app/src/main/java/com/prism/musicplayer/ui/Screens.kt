@@ -36,6 +36,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -47,6 +48,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -71,10 +73,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.prism.musicplayer.LibraryView
 import com.prism.musicplayer.MAX_FILTER_SEC
 import com.prism.musicplayer.PlayerUiState
 import com.prism.musicplayer.PlayerViewModel
 import com.prism.musicplayer.R
+import com.prism.musicplayer.data.AlbumFolder
 import com.prism.musicplayer.data.Song
 import com.prism.musicplayer.formatTime
 import kotlin.math.roundToInt
@@ -144,7 +148,14 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
         vm.writeRequests.collect { writeLauncher.launch(IntentSenderRequest.Builder(it).build()) }
     }
     LaunchedEffect(Unit) {
-        vm.messages.collect { snackbar.showSnackbar(it) }
+        vm.messages.collect { message ->
+            val folder = message.openFolderSuffix
+            val result = snackbar.showSnackbar(
+                message = message.text,
+                actionLabel = if (folder != null) "Open" else null,
+            )
+            if (result == SnackbarResult.ActionPerformed && folder != null) vm.openAlbumBySuffix(folder)
+        }
     }
 
     fun startAlbum(name: String) {
@@ -160,10 +171,12 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
         }
     }
 
-    // Back button leaves selection mode first
+    // Back button: leave selection mode first, then close an opened album
+    BackHandler(enabled = state.openFolder != null) { vm.closeAlbum() }
     BackHandler(enabled = state.selecting) { vm.clearSelection() }
 
-    val visibleSongs = remember(state.allSongs, state.minSec, state.maxSec) { state.visibleSongs }
+    val visibleSongs = remember(state.allSongs, state.minSec, state.maxSec, state.openFolder) { state.visibleSongs }
+    val albums = remember(state.allSongs) { state.albums }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -191,22 +204,33 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
             if (!granted) {
                 PermissionPrompt(onAllow = { permissionLauncher.launch(permission) })
             } else {
-                LengthFilter(
-                    minSec = state.minSec,
-                    maxSec = state.maxSec,
-                    shown = visibleSongs.size,
-                    total = state.allSongs.size,
-                    onChange = vm::setLengthFilter,
-                )
-                SongList(
-                    songs = visibleSongs,
-                    current = state.currentSong,
-                    loading = state.loading,
-                    total = state.allSongs.size,
-                    selectedIds = state.selectedIds,
-                    onPlay = vm::playSong,
-                    onToggleSelected = vm::toggleSelected,
-                )
+                LibraryTabs(view = state.view, onView = vm::setView)
+                if (state.view == LibraryView.ALBUMS && state.openFolder == null) {
+                    AlbumList(albums = albums, loading = state.loading, onOpen = vm::openAlbum)
+                } else {
+                    if (state.openFolder != null) {
+                        AlbumHeader(
+                            name = albums.firstOrNull { it.path == state.openFolder }?.name ?: "Album",
+                            onBack = vm::closeAlbum,
+                        )
+                    }
+                    LengthFilter(
+                        minSec = state.minSec,
+                        maxSec = state.maxSec,
+                        shown = visibleSongs.size,
+                        total = if (state.openFolder != null) state.allSongs.count { it.folderPath == state.openFolder } else state.allSongs.size,
+                        onChange = vm::setLengthFilter,
+                    )
+                    SongList(
+                        songs = visibleSongs,
+                        current = state.currentSong,
+                        loading = state.loading,
+                        total = state.allSongs.size,
+                        selectedIds = state.selectedIds,
+                        onPlay = vm::playSong,
+                        onToggleSelected = vm::toggleSelected,
+                    )
+                }
             }
         }
     }
@@ -251,6 +275,71 @@ private fun TopBar(onTheme: () -> Unit) {
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.primary)
                 .clickable(onClick = onTheme)
+        )
+    }
+}
+
+// ------------------------------------------------------------------- albums
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LibraryTabs(view: LibraryView, onView: (LibraryView) -> Unit) {
+    Row(
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilterChip(selected = view == LibraryView.SONGS, onClick = { onView(LibraryView.SONGS) }, label = { Text("Songs") })
+        FilterChip(selected = view == LibraryView.ALBUMS, onClick = { onView(LibraryView.ALBUMS) }, label = { Text("Albums") })
+    }
+}
+
+/** Every folder that has music in it. Tap one to open it. */
+@Composable
+private fun AlbumList(albums: List<AlbumFolder>, loading: Boolean, onOpen: (String) -> Unit) {
+    when {
+        loading -> CenteredMessage("Loading your music…")
+        albums.isEmpty() -> CenteredMessage("No albums yet.\nPress and hold songs in the Songs tab to make one.")
+        else -> LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp),
+        ) {
+            items(albums, key = { it.path }) { album ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpen(album.path) }
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(album.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = (if (album.songCount == 1) "1 song" else "${album.songCount} songs") +
+                                " · " + formatTime(album.totalMs),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlbumHeader(name: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onBack) { Text("← Albums") }
+        Text(
+            text = name,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f),
         )
     }
 }
@@ -569,6 +658,8 @@ private fun NowPlayingSheet(state: PlayerUiState, vm: PlayerViewModel, onDismiss
                 onReset = { vm.setPitch(0f) },
             )
             Spacer(Modifier.height(20.dp))
+            MarkerPanel(state = state, vm = vm)
+            Spacer(Modifier.height(12.dp))
             CrossfadePanel(settings = state.crossfade, vm = vm)
             Spacer(Modifier.height(12.dp))
             ReverbPanel(params = state.reverb, vm = vm)
