@@ -29,12 +29,19 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -44,6 +51,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.RangeSlider
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -67,8 +75,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,7 +89,10 @@ import com.prism.musicplayer.PlayerUiState
 import com.prism.musicplayer.PlayerViewModel
 import com.prism.musicplayer.R
 import com.prism.musicplayer.data.AlbumFolder
+import com.prism.musicplayer.data.LibraryOrdering
+import com.prism.musicplayer.data.Move
 import com.prism.musicplayer.data.Song
+import com.prism.musicplayer.data.SortMode
 import com.prism.musicplayer.formatTime
 import kotlin.math.roundToInt
 
@@ -171,12 +184,38 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
         }
     }
 
-    // Back button: leave selection mode first, then close an opened album
-    BackHandler(enabled = state.openFolder != null) { vm.closeAlbum() }
+    // Back button, in this order: leave selection mode, stop arranging, close an opened album
+    BackHandler(enabled = state.openFolder != null && state.view == LibraryView.ALBUMS) { vm.closeAlbum() }
+    BackHandler(enabled = state.arranging) { vm.stopArranging() }
     BackHandler(enabled = state.selecting) { vm.clearSelection() }
 
-    val visibleSongs = remember(state.allSongs, state.minSec, state.maxSec, state.openFolder) { state.visibleSongs }
-    val albums = remember(state.allSongs) { state.albums }
+    // The lists on the two pages. While arranging, the length filter and the search are ignored so no song is hidden.
+    val arrangingMusic = state.arranging && state.view == LibraryView.SONGS
+    val arrangingAlbum = state.arranging && state.view == LibraryView.ALBUMS
+    val musicSongs = remember(
+        state.allSongs, state.minSec, state.maxSec, state.query, state.sort, state.customOrders, arrangingMusic,
+    ) { state.songsIn(null, everything = arrangingMusic) }
+    val albumSongs = remember(
+        state.allSongs, state.minSec, state.maxSec, state.query, state.sort, state.customOrders, state.openFolder, arrangingAlbum,
+    ) { state.openFolder?.let { state.songsIn(it, everything = arrangingAlbum) } ?: emptyList() }
+    val albums = remember(state.allSongs, state.sort) { state.albums }
+    val shownAlbums = remember(albums, state.query) { albums.filter { LibraryOrdering.matches(it, state.query) } }
+
+    // An opened album that no longer exists (all its songs were moved away) closes itself.
+    LaunchedEffect(albums, state.openFolder, state.loading) {
+        val open = state.openFolder
+        if (open != null && !state.loading && state.allSongs.isNotEmpty() && albums.none { it.path == open }) vm.closeAlbum()
+    }
+
+    // Swiping between "All music" and "Albums". The pager and the tabs stay in step.
+    val pager = rememberPagerState { 2 }
+    LaunchedEffect(pager.currentPage) {
+        vm.setView(if (pager.currentPage == 0) LibraryView.SONGS else LibraryView.ALBUMS)
+    }
+    LaunchedEffect(state.view) {
+        val target = if (state.view == LibraryView.SONGS) 0 else 1
+        if (pager.currentPage != target) pager.animateScrollToPage(target)
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -194,42 +233,55 @@ fun PrismApp(state: PlayerUiState, vm: PlayerViewModel) {
             }
         },
         snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = {
-            if (state.currentSong != null) {
-                MiniPlayer(state, onToggle = vm::togglePlayPause, onOpen = { showPlayer = true })
-            }
-        },
+        // The player is always there. With nothing playing it says so.
+        bottomBar = { MiniPlayer(state, onToggle = vm::togglePlayPause, onOpen = { showPlayer = true }) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (!granted) {
                 PermissionPrompt(onAllow = { permissionLauncher.launch(permission) })
             } else {
-                LibraryTabs(view = state.view, onView = vm::setView)
-                if (state.view == LibraryView.ALBUMS && state.openFolder == null) {
-                    AlbumList(albums = albums, loading = state.loading, onOpen = vm::openAlbum)
-                } else {
-                    if (state.openFolder != null) {
-                        AlbumHeader(
-                            name = albums.firstOrNull { it.path == state.openFolder }?.name ?: "Album",
-                            onBack = vm::closeAlbum,
+                SearchRow(
+                    query = state.query,
+                    onQuery = vm::setQuery,
+                    sort = state.sort,
+                    onSort = vm::setSort,
+                    canArrange = state.view == LibraryView.SONGS || state.openFolder != null,
+                    onArrange = vm::startArranging,
+                )
+                LibraryTabs(view = state.view, onView = vm::setView, sortLabel = state.sort.label)
+                if (state.arranging) ArrangeBar(onDone = vm::stopArranging)
+
+                HorizontalPager(
+                    state = pager,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    userScrollEnabled = !state.arranging,
+                ) { page ->
+                    if (page == 0) {
+                        SongsPage(
+                            state = state,
+                            vm = vm,
+                            songs = musicSongs,
+                            totalInScope = state.allSongs.size,
+                            arranging = arrangingMusic,
                         )
+                    } else if (state.openFolder == null) {
+                        AlbumList(albums = shownAlbums, loading = state.loading, query = state.query, onOpen = vm::openAlbum)
+                    } else {
+                        Column(Modifier.fillMaxSize()) {
+                            AlbumHeader(
+                                name = albums.firstOrNull { it.path == state.openFolder }?.name
+                                    ?: LibraryOrdering.folderName(state.openFolder),
+                                onBack = vm::closeAlbum,
+                            )
+                            SongsPage(
+                                state = state,
+                                vm = vm,
+                                songs = albumSongs,
+                                totalInScope = state.allSongs.count { it.folderPath == state.openFolder },
+                                arranging = arrangingAlbum,
+                            )
+                        }
                     }
-                    LengthFilter(
-                        minSec = state.minSec,
-                        maxSec = state.maxSec,
-                        shown = visibleSongs.size,
-                        total = if (state.openFolder != null) state.allSongs.count { it.folderPath == state.openFolder } else state.allSongs.size,
-                        onChange = vm::setLengthFilter,
-                    )
-                    SongList(
-                        songs = visibleSongs,
-                        current = state.currentSong,
-                        loading = state.loading,
-                        total = state.allSongs.size,
-                        selectedIds = state.selectedIds,
-                        onPlay = vm::playSong,
-                        onToggleSelected = vm::toggleSelected,
-                    )
                 }
             }
         }
@@ -283,22 +335,138 @@ private fun TopBar(onTheme: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LibraryTabs(view: LibraryView, onView: (LibraryView) -> Unit) {
+private fun LibraryTabs(view: LibraryView, onView: (LibraryView) -> Unit, sortLabel: String) {
     Row(
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        FilterChip(selected = view == LibraryView.SONGS, onClick = { onView(LibraryView.SONGS) }, label = { Text("Songs") })
+        FilterChip(selected = view == LibraryView.SONGS, onClick = { onView(LibraryView.SONGS) }, label = { Text("All music") })
         FilterChip(selected = view == LibraryView.ALBUMS, onClick = { onView(LibraryView.ALBUMS) }, label = { Text("Albums") })
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = sortLabel,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** The search box and the sort menu. */
+@Composable
+private fun SearchRow(
+    query: String,
+    onQuery: (String) -> Unit,
+    sort: SortMode,
+    onSort: (SortMode) -> Unit,
+    canArrange: Boolean,
+    onArrange: () -> Unit,
+) {
+    val focus = LocalFocusManager.current
+    var menuOpen by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQuery,
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            shape = RoundedCornerShape(28.dp),
+            placeholder = { Text("Search songs, artists, albums") },
+            trailingIcon = {
+                if (query.isNotEmpty()) TextButton(onClick = { onQuery("") }) { Text("✕") }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
+        )
+        Spacer(Modifier.width(4.dp))
+        Box {
+            TextButton(onClick = { menuOpen = true }) { Text("Sort ▼") }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                SortMode.values().forEach { mode ->
+                    DropdownMenuItem(
+                        text = { Text((if (mode == sort) "✓  " else "      ") + mode.label) },
+                        onClick = {
+                            menuOpen = false
+                            onSort(mode)
+                        },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Arrange my own order…") },
+                    enabled = canArrange,
+                    onClick = {
+                        menuOpen = false
+                        onArrange()
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** Shown while the songs are being rearranged by hand. */
+@Composable
+private fun ArrangeBar(onDone: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(start = 20.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Arranging. Use ▲ ▼ and Top to move songs. Saved for this list.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f).padding(vertical = 8.dp),
+            )
+            TextButton(onClick = onDone) { Text("Done") }
+        }
+    }
+}
+
+/** One page of songs: the length filter on top, then the list. */
+@Composable
+private fun SongsPage(
+    state: PlayerUiState,
+    vm: PlayerViewModel,
+    songs: List<Song>,
+    totalInScope: Int,
+    arranging: Boolean,
+) {
+    Column(Modifier.fillMaxSize()) {
+        if (!arranging) {
+            LengthFilter(
+                minSec = state.minSec,
+                maxSec = state.maxSec,
+                shown = songs.size,
+                total = totalInScope,
+                onChange = vm::setLengthFilter,
+            )
+        }
+        SongList(
+            songs = songs,
+            current = state.currentSong,
+            loading = state.loading,
+            total = totalInScope,
+            query = state.query,
+            selectedIds = state.selectedIds,
+            arranging = arranging,
+            onPlay = { song -> vm.playSong(song, songs) },
+            onToggleSelected = vm::toggleSelected,
+            onMove = vm::moveSong,
+        )
     }
 }
 
 /** Every folder that has music in it. Tap one to open it. */
 @Composable
-private fun AlbumList(albums: List<AlbumFolder>, loading: Boolean, onOpen: (String) -> Unit) {
+private fun AlbumList(albums: List<AlbumFolder>, loading: Boolean, query: String, onOpen: (String) -> Unit) {
     when {
         loading -> CenteredMessage("Loading your music…")
-        albums.isEmpty() -> CenteredMessage("No albums yet.\nPress and hold songs in the Songs tab to make one.")
+        albums.isEmpty() && query.isNotBlank() -> CenteredMessage("No albums match \"${query.trim()}\".")
+        albums.isEmpty() -> CenteredMessage("No albums yet.\nPress and hold songs in All music to make one.")
         else -> LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp),
@@ -417,14 +585,18 @@ private fun SongList(
     current: Song?,
     loading: Boolean,
     total: Int,
+    query: String,
     selectedIds: Set<Long>,
+    arranging: Boolean,
     onPlay: (Song) -> Unit,
     onToggleSelected: (Song) -> Unit,
+    onMove: (Song, Move) -> Unit,
 ) {
     val selecting = selectedIds.isNotEmpty()
     when {
         loading -> CenteredMessage("Loading your music…")
         total == 0 -> CenteredMessage("No music found on this phone.\nCopy some songs onto it and reopen Prism.")
+        songs.isEmpty() && query.isNotBlank() -> CenteredMessage("No songs match \"${query.trim()}\".")
         songs.isEmpty() -> CenteredMessage("No songs match this length filter.\nTry widening the range.")
         else -> LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -436,8 +608,10 @@ private fun SongList(
                     isCurrent = song.id == current?.id,
                     selecting = selecting,
                     selected = song.id in selectedIds,
+                    arranging = arranging,
                     onClick = { if (selecting) onToggleSelected(song) else onPlay(song) },
                     onLongClick = { onToggleSelected(song) },
+                    onMove = { how -> onMove(song, how) },
                 )
             }
         }
@@ -451,14 +625,16 @@ private fun SongRow(
     isCurrent: Boolean,
     selecting: Boolean,
     selected: Boolean,
+    arranging: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onMove: (Move) -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .combinedClickable(enabled = !arranging, onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -483,11 +659,25 @@ private fun SongRow(
             )
         }
         Spacer(Modifier.width(12.dp))
-        Text(
-            text = formatTime(song.durationMs),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (arranging) {
+            // simple move buttons: no dragging, so it works the same on every phone
+            listOf("▲" to Move.UP, "▼" to Move.DOWN, "Top" to Move.TOP).forEach { (label, how) ->
+                Text(
+                    text = label,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clickable { onMove(how) }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                )
+            }
+        } else {
+            Text(
+                text = formatTime(song.durationMs),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -530,8 +720,8 @@ private fun PermissionPrompt(onAllow: () -> Unit) {
 
 @Composable
 private fun MiniPlayer(state: PlayerUiState, onToggle: () -> Unit, onOpen: () -> Unit) {
-    val song = state.currentSong ?: return
-    val progress = if (state.durationMs > 0) {
+    val song = state.currentSong
+    val progress = if (song != null && state.durationMs > 0) {
         (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f)
     } else 0f
 
@@ -546,21 +736,28 @@ private fun MiniPlayer(state: PlayerUiState, onToggle: () -> Unit, onOpen: () ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onOpen)
+                    .clickable(enabled = song != null, onClick = onOpen)
                     .padding(start = 20.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                     Text(
-                        song.artist,
+                        text = song?.title ?: "Nothing to play",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (song != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = song?.artist ?: "Pick a song to start",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                IconButton(onClick = onToggle) {
+                // With nothing loaded, the button starts the first song of the list
+                IconButton(onClick = onToggle, enabled = song != null || state.allSongs.isNotEmpty()) {
                     Icon(
                         painter = painterResource(if (state.isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
                         contentDescription = if (state.isPlaying) "Pause" else "Play",

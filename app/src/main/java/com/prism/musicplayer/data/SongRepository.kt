@@ -20,6 +20,8 @@ object SongRepository {
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DATA, // the file's location; we only use its folder
+            MediaStore.Audio.Media.SIZE,
+            MediaStore.Audio.Media.DATE_ADDED,
         )
         val selection =
             "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 0"
@@ -31,6 +33,8 @@ object SongRepository {
             val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
             val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
             val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
+            val addedCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
@@ -42,6 +46,8 @@ object SongRepository {
                     durationMs = cursor.getLong(durationCol),
                     uri = ContentUris.withAppendedId(collection, id),
                     folderPath = cursor.getString(dataCol)?.substringBeforeLast('/', "") ?: "",
+                    sizeBytes = cursor.getLong(sizeCol),
+                    addedSec = cursor.getLong(addedCol),
                 )
             }
         }

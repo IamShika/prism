@@ -22,9 +22,12 @@ import com.prism.musicplayer.data.AlbumFolder
 import com.prism.musicplayer.data.AlbumMover
 import com.prism.musicplayer.data.AlbumNaming
 import com.prism.musicplayer.data.ExternalAudio
+import com.prism.musicplayer.data.LibraryOrdering
 import com.prism.musicplayer.data.MarkerRepository
+import com.prism.musicplayer.data.Move
 import com.prism.musicplayer.data.Song
 import com.prism.musicplayer.data.SongRepository
+import com.prism.musicplayer.data.SortMode
 import com.prism.musicplayer.data.TrackMarker
 import com.prism.musicplayer.data.TrackMarkers
 import kotlinx.coroutines.Job
@@ -76,7 +79,12 @@ data class PlayerUiState(
     val clipStartMs: Long = 0L,     // where the player is actually starting (position 0 of the seek bar = this spot in the file)
     // Library
     val view: LibraryView = LibraryView.SONGS,
-    val openFolder: String? = null,
+    val openFolder: String? = null,   // the opened album (only matters on the Albums page)
+    val query: String = "",
+    val sort: SortMode = SortMode.TITLE_AZ,
+    /** The orders the user arranged by hand. Key = album folder, or "" for all music. */
+    val customOrders: Map<String, List<Long>> = emptyMap(),
+    val arranging: Boolean = false,
     // Album creator
     val selectedIds: Set<Long> = emptySet(),
     val albumBusy: Boolean = false,
@@ -86,21 +94,43 @@ data class PlayerUiState(
     /** True while the user is picking songs for an album. */
     val selecting: Boolean get() = selectedIds.isNotEmpty()
 
-    /** The songs that pass the length filter (and are in the opened album, if one is open). */
-    val visibleSongs: List<Song>
-        get() = allSongs.filter { song ->
+    /**
+     * The songs of [folder] (null = all music) that pass the length filter and the search, in the chosen order.
+     * With [everything] the filter and search are ignored: used while arranging, so no song is hidden.
+     */
+    fun songsIn(folder: String?, everything: Boolean = false): List<Song> {
+        val inScope = if (folder == null) allSongs else allSongs.filter { it.folderPath == folder }
+        val shown = if (everything) inScope else inScope.filter { song ->
             val sec = song.durationMs / 1000
-            sec >= minSec && (maxSec >= MAX_FILTER_SEC || sec <= maxSec) &&
-                (openFolder == null || song.folderPath == openFolder)
+            sec >= minSec && (maxSec >= MAX_FILTER_SEC || sec <= maxSec) && LibraryOrdering.matches(song, query)
         }
+        return LibraryOrdering.sort(shown, sort, customOrders[folder ?: ""])
+    }
 
-    /** Every folder with music in it, for the Albums list. */
+    /** The songs on the "All music" page. */
+    val visibleSongs: List<Song> get() = songsIn(null)
+
+    /** The folder whose songs are on screen right now: the opened album, or null for all music. */
+    val scopeFolder: String? get() = if (view == LibraryView.ALBUMS) openFolder else null
+
+    /** Every folder with music in it, for the Albums list (search and sort apply). */
     val albums: List<AlbumFolder>
-        get() = allSongs
-            .filter { it.folderPath.isNotEmpty() }
-            .groupBy { it.folderPath }
-            .map { (path, songs) -> AlbumFolder(path, songs.size, songs.sumOf { it.durationMs }) }
-            .sortedBy { it.name.lowercase() }
+        get() = LibraryOrdering.sortAlbums(
+            allSongs
+                .filter { it.folderPath.isNotEmpty() }
+                .groupBy { it.folderPath }
+                .map { (path, songs) ->
+                    AlbumFolder(
+                        path = path,
+                        songCount = songs.size,
+                        totalMs = songs.sumOf { it.durationMs },
+                        totalBytes = songs.sumOf { it.sizeBytes },
+                        newestAddedSec = songs.maxOf { it.addedSec },
+                        oldestAddedSec = songs.minOf { it.addedSec },
+                    )
+                },
+            sort,
+        )
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
@@ -116,6 +146,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(
         PlayerUiState(
             accent = prefs.getInt(KEY_ACCENT, DEFAULT_ACCENT),
+            sort = SortMode.values().firstOrNull { it.name == prefs.getString(KEY_SORT, null) } ?: SortMode.TITLE_AZ,
+            customOrders = LibraryOrdering.decodeOrders(prefs.getString(KEY_ORDERS, "") ?: ""),
             reverb = engine.reverb,
             crossfade = engine.crossfade,
             speed = player.playbackParameters.speed,
@@ -171,8 +203,50 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setView(view: LibraryView) {
-        // leaving the Albums list for Songs shows every song again
-        _state.update { it.copy(view = view, openFolder = if (view == LibraryView.SONGS) null else it.openFolder) }
+        // each page keeps its own place; arranging belongs to one list, so it ends when you change page
+        _state.update { if (it.view == view) it else it.copy(view = view, arranging = false) }
+    }
+
+    fun setQuery(query: String) {
+        _state.update { it.copy(query = query) }
+    }
+
+    fun setSort(sort: SortMode) {
+        prefs.edit().putString(KEY_SORT, sort.name).apply()
+        _state.update { it.copy(sort = sort, arranging = if (sort == SortMode.CUSTOM) it.arranging else false) }
+    }
+
+    // ------------------------------------------------- arranging songs by hand
+
+    /** Starts rearranging the songs on screen. The order is saved separately for each album. */
+    fun startArranging() {
+        val current = _state.value
+        val key = current.scopeFolder ?: ""
+        // Keep an order the user arranged earlier. Otherwise start from what they see now (e.g. A to Z),
+        // so nothing jumps around when arranging begins.
+        if (current.customOrders[key].isNullOrEmpty()) {
+            saveOrder(key, current.songsIn(current.scopeFolder, everything = true).map { it.id })
+        }
+        prefs.edit().putString(KEY_SORT, SortMode.CUSTOM.name).apply()
+        _state.update { it.copy(sort = SortMode.CUSTOM, arranging = true, query = "") }
+    }
+
+    fun stopArranging() {
+        _state.update { it.copy(arranging = false) }
+    }
+
+    /** Moves one song up, down or to the top of the list being arranged. */
+    fun moveSong(song: Song, how: Move) {
+        val current = _state.value
+        val key = current.scopeFolder ?: ""
+        val ids = current.songsIn(current.scopeFolder, everything = true).map { it.id }
+        saveOrder(key, LibraryOrdering.moved(ids, song.id, how))
+    }
+
+    private fun saveOrder(key: String, ids: List<Long>) {
+        val updated = _state.value.customOrders + (key to ids)
+        prefs.edit().putString(KEY_ORDERS, LibraryOrdering.encodeOrders(updated)).apply()
+        _state.update { it.copy(customOrders = updated) }
     }
 
     fun openAlbum(path: String) {
@@ -192,8 +266,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     // --------------------------------------------------------------- playback
 
     /** Plays [song] and queues the rest of the currently filtered list after it. */
-    fun playSong(song: Song) {
-        val list = _state.value.visibleSongs
+    fun playSong(song: Song, queue: List<Song> = _state.value.visibleSongs) {
+        val list = queue
         val index = list.indexOfFirst { it.id == song.id }
         if (index < 0) return
         _state.update { it.copy(playError = null) }
@@ -229,7 +303,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun togglePlayPause() {
         when {
-            player.currentMediaItem == null -> _state.value.visibleSongs.firstOrNull()?.let(::playSong)
+            player.currentMediaItem == null -> _state.value.visibleSongs.firstOrNull()?.let { playSong(it) }
             player.isPlaying -> player.pause()
             else -> {
                 if (player.playbackState == Player.STATE_ENDED) player.seekToDefaultPosition()
@@ -407,7 +481,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectAllVisible() {
-        _state.update { it.copy(selectedIds = it.visibleSongs.map { song -> song.id }.toSet()) }
+        _state.update { it.copy(selectedIds = it.songsIn(it.scopeFolder).map { song -> song.id }.toSet()) }
     }
 
     fun clearSelection() {
@@ -526,6 +600,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val KEY_ACCENT = "accent_color"
+        const val KEY_SORT = "sort_mode"
+        const val KEY_ORDERS = "custom_orders"
         const val PREVIEW_TAIL_MS = 3000L
     }
 }
