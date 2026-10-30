@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -15,12 +16,15 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import com.prism.musicplayer.audio.AudioEngine
+import com.prism.musicplayer.audio.BpmAnalyzer
+import com.prism.musicplayer.audio.TapTempo
 import com.prism.musicplayer.audio.CrossfadeSettings
 import com.prism.musicplayer.audio.ReverbParams
 import com.prism.musicplayer.audio.ReverbPresets
 import com.prism.musicplayer.data.AlbumFolder
 import com.prism.musicplayer.data.AlbumMover
 import com.prism.musicplayer.data.AlbumNaming
+import com.prism.musicplayer.data.BpmRepository
 import com.prism.musicplayer.data.ExternalAudio
 import com.prism.musicplayer.data.LibraryOrdering
 import com.prism.musicplayer.data.MarkerRepository
@@ -52,6 +56,9 @@ val DEFAULT_ACCENT: Int = 0xFF8B7CFF.toInt()
 /** Which list the home screen shows. */
 enum class LibraryView { SONGS, ALBUMS }
 
+/** How sure the BPM detector was about [songId], from 0 to 1. */
+class BpmCheck(val songId: Long, val confidence: Float)
+
 /** A short message for the screen. If [openFolderSuffix] is set, the message offers an "Open" button for that folder. */
 class UiMessage(val text: String, val openFolderSuffix: String? = null)
 
@@ -77,6 +84,11 @@ data class PlayerUiState(
     val markers: TrackMarker = TrackMarker(),
     val fullDurationMs: Long = 0L,  // the whole file, ignoring markers
     val clipStartMs: Long = 0L,     // where the player is actually starting (position 0 of the seek bar = this spot in the file)
+    // Tempo (BPM) of every song measured so far
+    val bpms: Map<Long, Float> = emptyMap(),
+    val bpmBusy: Boolean = false,
+    val bpmProgress: Float = 0f,
+    val bpmCheck: BpmCheck? = null,
     // Library
     val view: LibraryView = LibraryView.SONGS,
     val openFolder: String? = null,   // the opened album (only matters on the Albums page)
@@ -138,6 +150,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("prism_prefs", Context.MODE_PRIVATE)
     private val markerRepo = MarkerRepository.get(app)
+    private val bpmRepo = BpmRepository.get(app)
+    private val tapTempo = TapTempo()
 
     /** The sound engine is shared with the notification and the "open with" overlay. */
     private val engine = AudioEngine.get(app)
@@ -146,6 +160,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(
         PlayerUiState(
             accent = prefs.getInt(KEY_ACCENT, DEFAULT_ACCENT),
+            bpms = bpmRepo.all(),
             sort = SortMode.values().firstOrNull { it.name == prefs.getString(KEY_SORT, null) } ?: SortMode.TITLE_AZ,
             customOrders = LibraryOrdering.decodeOrders(prefs.getString(KEY_ORDERS, "") ?: ""),
             reverb = engine.reverb,
@@ -376,6 +391,72 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun setReverbPreset(name: String) {
         val preset = ReverbPresets.all.firstOrNull { it.first == name }?.second ?: return
         updateReverb { current -> preset.copy(enabled = current.enabled) }
+    }
+
+    // -------------------------------------------------------------------- tempo
+
+    /** Measures the tempo of the current song (takes a few seconds, in the background). */
+    fun detectBpm() {
+        val current = _state.value
+        val song = current.currentSong ?: return
+        if (song.id < 0 || current.bpmBusy) return
+        val length = if (current.fullDurationMs > 0) current.fullDurationMs else song.durationMs
+
+        _state.update { it.copy(bpmBusy = true, bpmProgress = 0f, bpmCheck = null) }
+        viewModelScope.launch {
+            var lastShown = 0f
+            val result = try {
+                BpmAnalyzer.analyze(getApplication(), song.uri, length) { progress ->
+                    if (progress - lastShown >= 0.03f) { // not on every tiny step
+                        lastShown = progress
+                        _state.update { it.copy(bpmProgress = progress) }
+                    }
+                }
+            } catch (e: Exception) {
+                null
+            }
+            if (result == null) {
+                _state.update { it.copy(bpmBusy = false) }
+                say("Couldn't find a clear tempo in this song. You can tap along to the beat instead.")
+            } else {
+                saveBpm(song.id, result.bpm)
+                _state.update { it.copy(bpmBusy = false, bpmCheck = BpmCheck(song.id, result.confidence)) }
+            }
+        }
+    }
+
+    /** Sets the tempo by hand. */
+    fun setBpm(bpm: Float) {
+        val song = _state.value.currentSong ?: return
+        if (song.id < 0) return
+        saveBpm(song.id, bpm)
+    }
+
+    fun halveBpm() {
+        val current = _state.value.currentSong?.let { _state.value.bpms[it.id] } ?: return
+        setBpm(current / 2f)
+    }
+
+    fun doubleBpm() {
+        val current = _state.value.currentSong?.let { _state.value.bpms[it.id] } ?: return
+        setBpm(current * 2f)
+    }
+
+    /** Tap on the beat: the tempo follows your taps. */
+    fun tapBpm() {
+        tapTempo.tap(SystemClock.elapsedRealtime())?.let { setBpm(it) }
+    }
+
+    fun clearBpm() {
+        val song = _state.value.currentSong ?: return
+        bpmRepo.set(song.id, null)
+        _state.update { it.copy(bpms = it.bpms - song.id, bpmCheck = null) }
+    }
+
+    private fun saveBpm(songId: Long, bpm: Float) {
+        val value = (Math.round(bpm.coerceIn(30f, 300f) * 10) / 10f)
+        bpmRepo.set(songId, value)
+        _state.update { it.copy(bpms = it.bpms + (songId to value)) }
     }
 
     // ------------------------------------------------------------ start/end markers

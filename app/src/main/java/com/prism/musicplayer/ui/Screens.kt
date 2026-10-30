@@ -459,6 +459,7 @@ private fun SongsPage(
                 total = totalInScope,
                 query = state.query,
                 selectedIds = state.selectedIds,
+                bpms = state.bpms,
                 onPlay = { song -> vm.playSong(song, songs) },
                 onToggleSelected = vm::toggleSelected,
             )
@@ -593,6 +594,7 @@ private fun SongList(
     total: Int,
     query: String,
     selectedIds: Set<Long>,
+    bpms: Map<Long, Float>,
     onPlay: (Song) -> Unit,
     onToggleSelected: (Song) -> Unit,
 ) {
@@ -612,6 +614,7 @@ private fun SongList(
                     isCurrent = song.id == current?.id,
                     selecting = selecting,
                     selected = song.id in selectedIds,
+                    bpm = bpms[song.id],
                     onClick = { if (selecting) onToggleSelected(song) else onPlay(song) },
                     onLongClick = { onToggleSelected(song) },
                 )
@@ -627,6 +630,7 @@ private fun SongRow(
     isCurrent: Boolean,
     selecting: Boolean,
     selected: Boolean,
+    bpm: Float?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -651,7 +655,7 @@ private fun SongRow(
                 color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = song.artist,
+                text = if (bpm != null) "${song.artist} · ${formatBpm(bpm)} BPM" else song.artist,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodySmall,
@@ -841,6 +845,8 @@ private fun NowPlayingSheet(state: PlayerUiState, vm: PlayerViewModel, onDismiss
                 onReset = { vm.setPitch(0f) },
             )
             Spacer(Modifier.height(20.dp))
+            BpmPanel(state = state, vm = vm)
+            Spacer(Modifier.height(12.dp))
             MarkerPanel(state = state, vm = vm)
             Spacer(Modifier.height(12.dp))
             CrossfadePanel(settings = state.crossfade, vm = vm)

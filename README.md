@@ -27,7 +27,7 @@ Needs Android 8.0 or newer.
 | ✅ | Start and end markers per song: skip the silence before or after the music. Saved for each song | Done in v0.5 |
 | ✅ | Search, sorting (A to Z, newest, biggest and more) and your own hand-arranged order (drag to move), saved for each album | Done in v0.6 |
 | ✅ | Swipe between All music and Albums; the player bar is always visible | Done in v0.6 |
-| ⬜ | BPM detector | Planned |
+| ✅ | BPM detector: finds a song's tempo from the audio (or tap along), saved per song, shown in the song list | Done in v0.7 |
 | ⬜ | Waveform view with real-time rewind and scrubbing | Planned |
 | ✅ | Background playback with notification, lock-screen and Bluetooth controls | Done in v0.3 |
 | ✅ | "Open with Prism" from a file manager: a small player pops up over the file manager and plays the file right there | Done in v0.3 |
@@ -85,6 +85,11 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `ui/ArrangeList.kt` | The drag-to-reorder song list. |
 | `ui/DragMath.kt` | The maths of dragging a row to a new place. Fully tested. |
 | `data/AlbumFolder.kt` | A folder with music in it (an album). |
+| `audio/BpmDetector.kt` | Finds the tempo from the sound: pure maths, plus tap tempo and saving. Fully tested with made-up drum tracks. |
+| `audio/AudioDecoder.kt` | Reads a song into raw sound using the phone's own decoders (also for the waveform later). |
+| `audio/BpmAnalyzer.kt` | Runs the decoder and the detector together in the background. |
+| `data/BpmRepository.kt` | Remembers each song's tempo. |
+| `ui/BpmPanel.kt` | The "Tempo" panel in the player. |
 | `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
 | `audio/ReverbAudioProcessor.kt` | Plugs the reverb into the player's sound pipeline. |
@@ -107,6 +112,7 @@ tools/album-test/run.sh
 tools/marker-test/run.sh
 tools/library-test/run.sh
 tools/drag-test/run.sh
+tools/bpm-test/run.sh
 ```
 
 ## Building on your own computer (optional)
@@ -142,7 +148,7 @@ From then on every release APK uses your key, and every GitHub build gets a high
 
 ## Roadmap
 
-- **v0.4:** ~~album creator~~ (done), BPM detector (then the reverb "Tempo" sync can follow the song's beat).
+- **v0.4 to v0.7:** ~~album creator, markers, search and sorting, BPM detector~~ (done). Next, the reverb "Tempo" sync can follow the song's beat.
 - **v0.5:** waveform view.
 - **v0.4:** real-time rewind and scrubbing (the BandLab-style audio stretch). This is the hardest feature and may need a custom audio engine.
 
