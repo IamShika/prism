@@ -29,7 +29,8 @@ Needs Android 8.0 or newer.
 | ✅ | Swipe between All music and Albums; the player bar is always visible | Done in v0.6 |
 | ✅ | BPM detector: finds a song's tempo from the audio (or tap along), saved per song, shown in the song list | Done in v0.7 |
 | ✅ | Waveform view: whole-song bar and a zoomed 10-second scroller, drag to scrub (you hear it), hold buttons to rewind / fast-forward | Done in v0.8 |
-| ⬜ | True stretching and reverse audio (like BandLab) | Planned |
+| ✅ | Scratch engine: drag the waveform like a record and hear the song forwards or backwards; Rewind / Forward are heard running backwards / fast | Done in v0.9 |
+| ⬜ | Pitch-preserving stretch of a section (BandLab "audio stretch") | Planned |
 | ✅ | Background playback with notification, lock-screen and Bluetooth controls | Done in v0.3 |
 | ✅ | "Open with Prism" from a file manager: a small player pops up over the file manager and plays the file right there | Done in v0.3 |
 
@@ -94,6 +95,12 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `audio/Waveform.kt` | The song's shape as data (lowest and highest level every 20 ms), saving, and the maths for drawing and dragging. Fully tested. |
 | `audio/WaveformAnalyzer.kt` | Decodes a song in the background to build its waveform. |
 | `data/WaveformCache.kt` | Keeps finished waveforms on the phone so each song is only analysed once. |
+| `audio/ScratchRenderer.kt` | The sound maker of the scratch engine: plays a song at any speed, forwards or backwards, following a finger. Pure maths, fully tested. |
+| `audio/PcmFormat.kt` | How a decoded song is stored for the scratch engine (file header, stereo conversion). Tested. |
+| `audio/PcmDecoder.kt` | Reads a whole song as stereo sound with the phone's own decoders. |
+| `data/PcmCache.kt` | Keeps the three most recent decoded songs in the app's cache so each is only decoded once. |
+| `audio/ScratchEngine.kt` | Connects the scratch sound to the phone's speaker (low-latency audio output). |
+| `audio/PlayheadSmoother.kt` | Evens out the player's position so the zoomed waveform glides. Tested. |
 | `ui/WaveformPanel.kt` | The "Waveform" panel in the player: whole-song view, zoom, scrubbing and the Rewind / Forward buttons. |
 | `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
@@ -119,6 +126,7 @@ tools/library-test/run.sh
 tools/drag-test/run.sh
 tools/bpm-test/run.sh
 tools/wave-test/run.sh
+tools/scratch-test/run.sh
 ```
 
 ## Building on your own computer (optional)

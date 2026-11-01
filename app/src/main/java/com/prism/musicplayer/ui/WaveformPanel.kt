@@ -37,11 +37,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.prism.musicplayer.PlayerUiState
 import com.prism.musicplayer.PlayerViewModel
+import com.prism.musicplayer.audio.PlayheadSmoother
 import com.prism.musicplayer.audio.WaveformMath
 import kotlin.math.max
 
 /** How much of the song fits on screen in the zoomed view. */
 private const val ZOOM_WINDOW_MS = 10_000L
+
+/** The zoomed view is drawn in columns of this length (a multiple of the waveform's 20 ms slices, so the picture stays steady while it scrolls). */
+private const val ZOOM_COLUMN_MS = 40L
 
 /**
  * The song as a picture of its sound. Tap or drag to jump around: you hear the sound as you drag, even
@@ -61,13 +65,23 @@ fun WaveformPanel(state: PlayerUiState, vm: PlayerViewModel) {
     var scrubPos by remember { mutableLongStateOf(0L) }
     var live by remember { mutableLongStateOf(0L) }
 
-    // while the zoomed view is playing it is redrawn on every screen frame, so it scrolls smoothly
-    LaunchedEffect(zoom, state.isPlaying) {
+    // the scratch sound is made ready once the waveform is done (both read the whole song, one after the other)
+    LaunchedEffect(song.id, state.waveformSongId, state.waveformBusy) {
+        if (state.waveformSongId == song.id && !state.waveformBusy) vm.ensureScratch()
+    }
+
+    // while the zoomed view is moving it is redrawn on every screen frame; the smoother evens out
+    // the player's uneven position reports so the picture glides
+    val smoother = remember { PlayheadSmoother() }
+    val speedNow by rememberUpdatedState(state.speed.toDouble())
+    LaunchedEffect(zoom, state.isPlaying, state.scratching, song.id) {
+        smoother.reset()
         live = vm.livePositionMs()
-        if (zoom && state.isPlaying) {
+        if (zoom && (state.isPlaying || state.scratching)) {
             while (true) {
-                withFrameNanos { }
-                live = vm.livePositionMs()
+                val now = withFrameNanos { it }
+                val reported = vm.livePositionMs()
+                live = if (state.scratching) reported else smoother.update(reported, now, speedNow).toLong()
             }
         }
     }
@@ -76,7 +90,7 @@ fun WaveformPanel(state: PlayerUiState, vm: PlayerViewModel) {
     val clipEnd = state.clipStartMs + state.durationMs
     val shown = when {
         scrubbing -> scrubPos
-        zoom && state.isPlaying -> live
+        zoom && (state.isPlaying || state.scratching) -> live
         else -> clipStart + state.positionMs
     }
     val shownNow by rememberUpdatedState(shown)
@@ -148,7 +162,7 @@ fun WaveformPanel(state: PlayerUiState, vm: PlayerViewModel) {
                     ) {
                         val count = max((size.width / 3.dp.toPx()).toInt(), 1)
                         val cols = WaveformMath.columns(wave, 0L, full, count)
-                        drawColumns(cols, count, { c -> full * c / count }, shown, clipStart, clipEnd, played, upcoming, dim)
+                        drawColumns(cols, count, count, 0f, { c -> full * c / count }, shown, clipStart, clipEnd, played, upcoming, dim)
                         val x = size.width * (shown.toFloat() / full).coerceIn(0f, 1f)
                         drawLine(line, Offset(x, 0f), Offset(x, size.height), strokeWidth = 2.dp.toPx())
                     }
@@ -183,10 +197,12 @@ fun WaveformPanel(state: PlayerUiState, vm: PlayerViewModel) {
                                 )
                             }
                     ) {
-                        val count = max((size.width / 2.dp.toPx()).toInt(), 1)
-                        val from = shown - ZOOM_WINDOW_MS / 2
-                        val cols = WaveformMath.columns(wave, from, from + ZOOM_WINDOW_MS, count)
-                        drawColumns(cols, count, { c -> from + ZOOM_WINDOW_MS * c / count }, shown, clipStart, clipEnd, played, upcoming, dim)
+                        // columns sit on a fixed grid in song time and slide sideways, so the picture glides instead of shimmering
+                        val grid = WaveformMath.gridStart(shown - ZOOM_WINDOW_MS / 2, ZOOM_COLUMN_MS)
+                        val visible = (ZOOM_WINDOW_MS / ZOOM_COLUMN_MS).toInt()
+                        val from = grid.firstColumn * ZOOM_COLUMN_MS
+                        val cols = WaveformMath.columns(wave, from, from + (visible + 1) * ZOOM_COLUMN_MS, visible + 1)
+                        drawColumns(cols, visible + 1, visible, grid.fraction, { c -> from + c * ZOOM_COLUMN_MS }, shown, clipStart, clipEnd, played, upcoming, dim)
                         val x = size.width / 2f
                         drawLine(line, Offset(x, 0f), Offset(x, size.height), strokeWidth = 2.dp.toPx())
                     }
@@ -199,7 +215,13 @@ fun WaveformPanel(state: PlayerUiState, vm: PlayerViewModel) {
                 HoldButton("Forward  ▶▶", Modifier.weight(1f), onPress = { vm.startSeekHold(1) }, onRelease = vm::stopSeekHold)
             }
             Text(
-                text = "Drag the waveform to scrub and hear it as you go. Hold a button to rewind or fast-forward.",
+                text = when {
+                    state.scratchReady && state.scratchSongId == song.id ->
+                        "Drag the waveform like a record: forwards or backwards, you hear it. Hold a button to rewind or fast-forward."
+                    state.scratchBusy && state.scratchSongId == song.id ->
+                        "Getting the scratch sound ready (first time for this song only). Until then, scrubbing uses the normal player."
+                    else -> "Drag the waveform to scrub. Hold a button to rewind or fast-forward."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 8.dp, start = 4.dp),
@@ -211,7 +233,9 @@ fun WaveformPanel(state: PlayerUiState, vm: PlayerViewModel) {
 /** Draws the vertical lines of the waveform. Played part bright, coming part grey, trimmed-away parts faint. */
 private fun DrawScope.drawColumns(
     columns: FloatArray,
-    count: Int,
+    count: Int,          // columns to draw
+    visible: Int,        // how many fit across the width (a scrolling view draws one extra, partly off the edge)
+    shift: Float,        // how far the view is scrolled into the first column, 0 to 1
     timeOf: (Int) -> Long,
     shown: Long,
     clipStart: Long,
@@ -222,7 +246,7 @@ private fun DrawScope.drawColumns(
 ) {
     val middle = size.height / 2f
     val half = size.height / 2f - 3.dp.toPx()
-    val step = size.width / count
+    val step = size.width / visible
     val stroke = max(step * 0.7f, 1f)
     for (c in 0 until count) {
         val t = timeOf(c)
@@ -237,7 +261,7 @@ private fun DrawScope.drawColumns(
             top = middle - 1f
             bottom = middle + 1f
         }
-        val x = (c + 0.5f) * step
+        val x = (c + 0.5f - shift) * step
         drawLine(color, Offset(x, top), Offset(x, bottom), strokeWidth = stroke)
     }
 }

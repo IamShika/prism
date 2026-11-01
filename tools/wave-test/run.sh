@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT="$(mktemp -d)"
 kotlinc app/src/main/java/com/prism/musicplayer/audio/Waveform.kt \
+        app/src/main/java/com/prism/musicplayer/audio/PlayheadSmoother.kt \
         tools/wave-test/WaveTest.kt \
         -include-runtime -d "$OUT/test.jar" 2>&1 | grep -v "^warning:" || true
 java -jar "$OUT/test.jar"

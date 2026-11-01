@@ -153,6 +153,20 @@ object WaveformMath {
         return out
     }
 
+    /** Where a grid of equal columns starts: the number of the first column, and how far into it the view begins (0 to 1). */
+    class GridStart(val firstColumn: Long, val fraction: Float)
+
+    /**
+     * For a scrolling view: the columns sit on a fixed grid in song time (column n covers n * [columnMs] to
+     * (n + 1) * [columnMs]), so a column always shows the same sound while the view slides past.
+     * Draw the columns starting from [GridStart.firstColumn] and shift them left by [GridStart.fraction] of a column.
+     * Pick [columnMs] as a multiple of the waveform's slice length (20 ms) for the steadiest picture.
+     */
+    fun gridStart(fromMs: Long, columnMs: Long): GridStart {
+        val first = Math.floorDiv(fromMs, columnMs)
+        return GridStart(first, (fromMs - first * columnMs).toFloat() / columnMs)
+    }
+
     /** A finger at [x] pixels on a bar that is [width] pixels wide and shows the whole song of [durationMs]. */
     fun timeAt(x: Float, width: Float, durationMs: Long): Long {
         if (width <= 0f) return 0L

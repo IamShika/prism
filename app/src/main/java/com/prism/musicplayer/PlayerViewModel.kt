@@ -18,6 +18,7 @@ import androidx.media3.common.util.UnstableApi
 import com.prism.musicplayer.audio.AudioEngine
 import com.prism.musicplayer.audio.BpmAnalyzer
 import com.prism.musicplayer.audio.TapTempo
+import com.prism.musicplayer.audio.ScratchEngine
 import com.prism.musicplayer.audio.Waveform
 import com.prism.musicplayer.audio.WaveformAnalyzer
 import com.prism.musicplayer.audio.CrossfadeSettings
@@ -30,6 +31,7 @@ import com.prism.musicplayer.data.BpmRepository
 import com.prism.musicplayer.data.ExternalAudio
 import com.prism.musicplayer.data.LibraryOrdering
 import com.prism.musicplayer.data.MarkerRepository
+import com.prism.musicplayer.data.PcmCache
 import com.prism.musicplayer.data.Move
 import com.prism.musicplayer.data.Song
 import com.prism.musicplayer.data.SongRepository
@@ -100,6 +102,11 @@ data class PlayerUiState(
     val waveformSongId: Long = -1L,   // which song the waveform (or the work in progress) belongs to
     val waveformBusy: Boolean = false,
     val waveformProgress: Float = 0f,
+    // Scratch sound (the engine that plays under your finger) for the current song
+    val scratchSongId: Long = -1L,    // which song the scratch sound (or the work in progress) belongs to
+    val scratchReady: Boolean = false,
+    val scratchBusy: Boolean = false,
+    val scratching: Boolean = false,  // true while the scratch engine is making the sound instead of the normal player
     // Library
     val view: LibraryView = LibraryView.SONGS,
     val openFolder: String? = null,   // the opened album (only matters on the Albums page)
@@ -164,6 +171,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val bpmRepo = BpmRepository.get(app)
     private val tapTempo = TapTempo()
     private val waveCache = WaveformCache(app)
+    private val pcmCache = PcmCache(app)
+    private val scratch = ScratchEngine()
 
     /** The sound engine is shared with the notification and the "open with" overlay. */
     private val engine = AudioEngine.get(app)
@@ -442,8 +451,50 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Where the player is right now, counted from the start of the file (not of the trimmed part). Cheap; called every frame. */
-    fun livePositionMs(): Long = _state.value.clipStartMs + player.currentPosition
+    // ----------------------------------------------------------- scratch sound
+
+    private var scratchJob: Job? = null
+
+    /** True when the scratch engine holds the sound of the song that is playing now. */
+    private fun scratchUsable(): Boolean {
+        val s = _state.value
+        return s.scratchReady && s.scratchSongId == s.currentSong?.id && scratch.loaded
+    }
+
+    /**
+     * Gets the current song ready for scratching: decodes it once (a few seconds, the first time only)
+     * and loads it into the scratch engine. Until it is ready, scrubbing uses the normal player.
+     */
+    fun ensureScratch() {
+        val current = _state.value
+        val song = current.currentSong ?: return
+        if (song.id < 0 || current.fullDurationMs <= 0L) return
+        if (current.scratchSongId == song.id && (current.scratchReady || current.scratchBusy)) return
+
+        scratchJob?.cancel()
+        scratch.unload()
+        val length = current.fullDurationMs
+        _state.update { it.copy(scratchSongId = song.id, scratchReady = false, scratchBusy = true) }
+        scratchJob = viewModelScope.launch {
+            val ready = try {
+                val pcm = withContext(Dispatchers.IO) { pcmCache.open(song.id, length) }
+                    ?: pcmCache.create(song.id, length, song.uri) { }
+                pcm != null && _state.value.scratchSongId == song.id && scratch.load(pcm)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
+            _state.update { if (it.scratchSongId == song.id) it.copy(scratchReady = ready, scratchBusy = false) else it }
+        }
+    }
+
+    /**
+     * Where the sound is right now, counted from the start of the file (not of the trimmed part).
+     * Cheap; called every frame. While the scratch engine is playing, it knows best.
+     */
+    fun livePositionMs(): Long =
+        if (_state.value.scratching) scratch.positionMs else _state.value.clipStartMs + player.currentPosition
 
     // ------------------------------------------------- scrubbing and rewinding
 
@@ -453,6 +504,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingScrubTarget: Long? = null
     private var scrubIdleJob: Job? = null
     private var seekHoldJob: Job? = null
+    private var engineScrub = false // true while the scratch engine (not the normal player) is making the sound
 
     /** The finger went down on the waveform. From now on the sound follows the finger. */
     fun beginScrub() {
@@ -460,15 +512,36 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         scrubWasPlaying = player.playWhenReady
         lastScrubSeekAt = 0L
         pendingScrubTarget = null
+
+        engineScrub = false
+        if (scratchUsable()) {
+            val from = livePositionMs()
+            player.pause()
+            engineScrub = scratch.begin(from)
+            if (engineScrub) {
+                _state.update { it.copy(scratching = true) }
+            } else if (scrubWasPlaying) {
+                player.play() // the engine refused: carry on with the normal player
+            }
+        }
     }
 
     /**
-     * Moves to [absoluteMs] (counted from the start of the file) and plays a little sound from there.
-     * The sound stops again shortly after the finger stops moving, like turning a record by hand.
+     * Moves to [absoluteMs] (counted from the start of the file) and plays sound from there.
+     * With the scratch engine the sound follows the finger exactly, backwards too, and stops when the finger stops.
+     * Without it, the normal player jumps there and plays a little, then stops shortly after.
      */
     fun scrubTo(absoluteMs: Long) {
         val current = _state.value
         val last = (current.durationMs - 1).coerceAtLeast(0L)
+
+        if (engineScrub) {
+            scratch.follow(absoluteMs)
+            val shown = (absoluteMs - current.clipStartMs).coerceIn(0L, last)
+            _state.update { it.copy(positionMs = shown) }
+            return
+        }
+
         val target = (absoluteMs - current.clipStartMs).coerceIn(0L, last)
 
         // seeking is not instant, so not more often than every few milliseconds; the newest target is kept
@@ -492,12 +565,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The finger came up. Playing goes back to how it was before. */
+    /** The finger came up. The normal player carries on from where the sound ended, as it was before (playing or paused). */
     fun endScrub() {
         scrubIdleJob?.cancel()
         pendingScrubTarget?.let { player.seekTo(it) }
         pendingScrubTarget = null
         scrubbing = false
+        if (engineScrub) {
+            engineScrub = false
+            val stoppedAt = scratch.end()
+            _state.update { it.copy(scratching = false) }
+            seekAbsolute(stoppedAt)
+        }
         if (scrubWasPlaying) player.play() else player.pause()
     }
 
@@ -509,19 +588,34 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Hold-to-rewind (direction -1) and hold-to-forward (+1). The longer it is held, the bigger the jumps.
-     * You hear short pieces of the song as it flies by.
+     * Hold-to-rewind (direction -1) and hold-to-forward (+1). With the scratch engine you hear the song
+     * running backwards (or fast forward), faster the longer you hold. Without it, the normal player jumps
+     * in bigger and bigger steps and you hear short pieces.
      */
     fun startSeekHold(direction: Int) {
         seekHoldJob?.cancel()
         beginScrub()
         seekHoldJob = viewModelScope.launch {
             var heldMs = 0L
-            while (true) {
-                val jump = (SEEK_HOLD_START_JUMP_MS + heldMs / 4).coerceAtMost(SEEK_HOLD_MAX_JUMP_MS)
-                scrubTo(livePositionMs() + direction * jump)
-                delay(SEEK_HOLD_TICK_MS)
-                heldMs += SEEK_HOLD_TICK_MS
+            if (engineScrub) {
+                while (true) {
+                    val speed = (SEEK_HOLD_START_SPEED + SEEK_HOLD_SPEED_PER_SECOND * heldMs / 1000.0)
+                        .coerceAtMost(SEEK_HOLD_MAX_SPEED)
+                    scratch.run(direction * speed)
+                    val clipStart = _state.value.clipStartMs
+                    val last = (_state.value.durationMs - 1).coerceAtLeast(0L)
+                    val shown = (scratch.positionMs - clipStart).coerceIn(0L, last)
+                    _state.update { it.copy(positionMs = shown) }
+                    delay(SEEK_HOLD_ENGINE_TICK_MS)
+                    heldMs += SEEK_HOLD_ENGINE_TICK_MS
+                }
+            } else {
+                while (true) {
+                    val jump = (SEEK_HOLD_START_JUMP_MS + heldMs / 4).coerceAtMost(SEEK_HOLD_MAX_JUMP_MS)
+                    scrubTo(livePositionMs() + direction * jump)
+                    delay(SEEK_HOLD_TICK_MS)
+                    heldMs += SEEK_HOLD_TICK_MS
+                }
             }
         }
     }
@@ -820,6 +914,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         // The player is NOT released: it belongs to the app and keeps playing in the background.
         player.removeListener(listener)
+        scratch.unload()
         engine.saveReverb()
         super.onCleared()
     }
@@ -834,5 +929,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         const val SEEK_HOLD_TICK_MS = 130L
         const val SEEK_HOLD_START_JUMP_MS = 400L
         const val SEEK_HOLD_MAX_JUMP_MS = 3000L
+        const val SEEK_HOLD_ENGINE_TICK_MS = 50L
+        const val SEEK_HOLD_START_SPEED = 2.0
+        const val SEEK_HOLD_SPEED_PER_SECOND = 1.5
+        const val SEEK_HOLD_MAX_SPEED = 6.0
     }
 }
