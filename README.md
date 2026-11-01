@@ -28,7 +28,8 @@ Needs Android 8.0 or newer.
 | ✅ | Search, sorting (A to Z, newest, biggest and more) and your own hand-arranged order (drag to move), saved for each album | Done in v0.6 |
 | ✅ | Swipe between All music and Albums; the player bar is always visible | Done in v0.6 |
 | ✅ | BPM detector: finds a song's tempo from the audio (or tap along), saved per song, shown in the song list | Done in v0.7 |
-| ⬜ | Waveform view with real-time rewind and scrubbing | Planned |
+| ✅ | Waveform view: whole-song bar and a zoomed 10-second scroller, drag to scrub (you hear it), hold buttons to rewind / fast-forward | Done in v0.8 |
+| ⬜ | True stretching and reverse audio (like BandLab) | Planned |
 | ✅ | Background playback with notification, lock-screen and Bluetooth controls | Done in v0.3 |
 | ✅ | "Open with Prism" from a file manager: a small player pops up over the file manager and plays the file right there | Done in v0.3 |
 
@@ -90,6 +91,10 @@ Everything lives in `app/src/main/java/com/prism/musicplayer/`. Each file does o
 | `audio/BpmAnalyzer.kt` | Runs the decoder and the detector together in the background. |
 | `data/BpmRepository.kt` | Remembers each song's tempo. |
 | `ui/BpmPanel.kt` | The "Tempo" panel in the player. |
+| `audio/Waveform.kt` | The song's shape as data (lowest and highest level every 20 ms), saving, and the maths for drawing and dragging. Fully tested. |
+| `audio/WaveformAnalyzer.kt` | Decodes a song in the background to build its waveform. |
+| `data/WaveformCache.kt` | Keeps finished waveforms on the phone so each song is only analysed once. |
+| `ui/WaveformPanel.kt` | The "Waveform" panel in the player: whole-song view, zoom, scrubbing and the Rewind / Forward buttons. |
 | `data/ExternalAudio.kt` | Figures out what to play when another app hands Prism a file. |
 | `audio/ReverbEngine.kt` | The reverb itself: pure maths, no Android parts. |
 | `audio/ReverbAudioProcessor.kt` | Plugs the reverb into the player's sound pipeline. |
@@ -113,6 +118,7 @@ tools/marker-test/run.sh
 tools/library-test/run.sh
 tools/drag-test/run.sh
 tools/bpm-test/run.sh
+tools/wave-test/run.sh
 ```
 
 ## Building on your own computer (optional)

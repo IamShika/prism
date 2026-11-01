@@ -823,6 +823,9 @@ private fun NowPlayingSheet(state: PlayerUiState, vm: PlayerViewModel, onDismiss
                 }
             }
 
+            Spacer(Modifier.height(16.dp))
+            WaveformPanel(state = state, vm = vm)
+
             Spacer(Modifier.height(24.dp))
             Text("Sound", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 

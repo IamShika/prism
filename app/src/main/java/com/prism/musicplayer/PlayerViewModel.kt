@@ -18,6 +18,8 @@ import androidx.media3.common.util.UnstableApi
 import com.prism.musicplayer.audio.AudioEngine
 import com.prism.musicplayer.audio.BpmAnalyzer
 import com.prism.musicplayer.audio.TapTempo
+import com.prism.musicplayer.audio.Waveform
+import com.prism.musicplayer.audio.WaveformAnalyzer
 import com.prism.musicplayer.audio.CrossfadeSettings
 import com.prism.musicplayer.audio.ReverbParams
 import com.prism.musicplayer.audio.ReverbPresets
@@ -34,6 +36,9 @@ import com.prism.musicplayer.data.SongRepository
 import com.prism.musicplayer.data.SortMode
 import com.prism.musicplayer.data.TrackMarker
 import com.prism.musicplayer.data.TrackMarkers
+import com.prism.musicplayer.data.WaveformCache
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -44,6 +49,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -89,6 +95,11 @@ data class PlayerUiState(
     val bpmBusy: Boolean = false,
     val bpmProgress: Float = 0f,
     val bpmCheck: BpmCheck? = null,
+    // Waveform of the current song
+    val waveform: Waveform? = null,
+    val waveformSongId: Long = -1L,   // which song the waveform (or the work in progress) belongs to
+    val waveformBusy: Boolean = false,
+    val waveformProgress: Float = 0f,
     // Library
     val view: LibraryView = LibraryView.SONGS,
     val openFolder: String? = null,   // the opened album (only matters on the Albums page)
@@ -152,6 +163,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val markerRepo = MarkerRepository.get(app)
     private val bpmRepo = BpmRepository.get(app)
     private val tapTempo = TapTempo()
+    private val waveCache = WaveformCache(app)
 
     /** The sound engine is shared with the notification and the "open with" overlay. */
     private val engine = AudioEngine.get(app)
@@ -391,6 +403,133 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun setReverbPreset(name: String) {
         val preset = ReverbPresets.all.firstOrNull { it.first == name }?.second ?: return
         updateReverb { current -> preset.copy(enabled = current.enabled) }
+    }
+
+    // ---------------------------------------------------------------- waveform
+
+    private var waveformJob: Job? = null
+
+    /** Draws the waveform of the current song, unless it is already there or being drawn. */
+    fun ensureWaveform() {
+        val current = _state.value
+        val song = current.currentSong ?: return
+        if (song.id < 0 || current.fullDurationMs <= 0L) return
+        if (current.waveformSongId == song.id && (current.waveform != null || current.waveformBusy)) return
+
+        waveformJob?.cancel()
+        val length = current.fullDurationMs
+        _state.update { it.copy(waveform = null, waveformSongId = song.id, waveformBusy = true, waveformProgress = 0f) }
+        waveformJob = viewModelScope.launch {
+            var wave = withContext(Dispatchers.IO) { waveCache.load(song.id, length) }
+            if (wave == null) {
+                var lastShown = 0f
+                wave = try {
+                    WaveformAnalyzer.build(getApplication(), song.uri, length) { progress ->
+                        if (progress - lastShown >= 0.03f) {
+                            lastShown = progress
+                            _state.update { if (it.waveformSongId == song.id) it.copy(waveformProgress = progress) else it }
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+                if (wave != null) withContext(Dispatchers.IO) { waveCache.save(song.id, length, wave) }
+            }
+            // only if the user is still on the same song
+            _state.update { if (it.waveformSongId == song.id) it.copy(waveform = wave, waveformBusy = false) else it }
+        }
+    }
+
+    /** Where the player is right now, counted from the start of the file (not of the trimmed part). Cheap; called every frame. */
+    fun livePositionMs(): Long = _state.value.clipStartMs + player.currentPosition
+
+    // ------------------------------------------------- scrubbing and rewinding
+
+    private var scrubbing = false
+    private var scrubWasPlaying = false
+    private var lastScrubSeekAt = 0L
+    private var pendingScrubTarget: Long? = null
+    private var scrubIdleJob: Job? = null
+    private var seekHoldJob: Job? = null
+
+    /** The finger went down on the waveform. From now on the sound follows the finger. */
+    fun beginScrub() {
+        scrubbing = true
+        scrubWasPlaying = player.playWhenReady
+        lastScrubSeekAt = 0L
+        pendingScrubTarget = null
+    }
+
+    /**
+     * Moves to [absoluteMs] (counted from the start of the file) and plays a little sound from there.
+     * The sound stops again shortly after the finger stops moving, like turning a record by hand.
+     */
+    fun scrubTo(absoluteMs: Long) {
+        val current = _state.value
+        val last = (current.durationMs - 1).coerceAtLeast(0L)
+        val target = (absoluteMs - current.clipStartMs).coerceIn(0L, last)
+
+        // seeking is not instant, so not more often than every few milliseconds; the newest target is kept
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastScrubSeekAt >= SCRUB_SEEK_INTERVAL_MS) {
+            lastScrubSeekAt = now
+            pendingScrubTarget = null
+            player.seekTo(target)
+        } else {
+            pendingScrubTarget = target
+        }
+        if (!player.playWhenReady) player.play()
+        _state.update { it.copy(positionMs = target) }
+
+        scrubIdleJob?.cancel()
+        scrubIdleJob = viewModelScope.launch {
+            delay(SCRUB_SILENCE_MS)
+            pendingScrubTarget?.let { player.seekTo(it) }
+            pendingScrubTarget = null
+            if (scrubbing) player.pause()
+        }
+    }
+
+    /** The finger came up. Playing goes back to how it was before. */
+    fun endScrub() {
+        scrubIdleJob?.cancel()
+        pendingScrubTarget?.let { player.seekTo(it) }
+        pendingScrubTarget = null
+        scrubbing = false
+        if (scrubWasPlaying) player.play() else player.pause()
+    }
+
+    /** A tap on the waveform: jump there, no scrubbing sound. */
+    fun seekAbsolute(absoluteMs: Long) {
+        val current = _state.value
+        val last = (current.durationMs - 1).coerceAtLeast(0L)
+        seekTo((absoluteMs - current.clipStartMs).coerceIn(0L, last))
+    }
+
+    /**
+     * Hold-to-rewind (direction -1) and hold-to-forward (+1). The longer it is held, the bigger the jumps.
+     * You hear short pieces of the song as it flies by.
+     */
+    fun startSeekHold(direction: Int) {
+        seekHoldJob?.cancel()
+        beginScrub()
+        seekHoldJob = viewModelScope.launch {
+            var heldMs = 0L
+            while (true) {
+                val jump = (SEEK_HOLD_START_JUMP_MS + heldMs / 4).coerceAtMost(SEEK_HOLD_MAX_JUMP_MS)
+                scrubTo(livePositionMs() + direction * jump)
+                delay(SEEK_HOLD_TICK_MS)
+                heldMs += SEEK_HOLD_TICK_MS
+            }
+        }
+    }
+
+    fun stopSeekHold() {
+        seekHoldJob?.cancel()
+        seekHoldJob = null
+        endScrub()
     }
 
     // -------------------------------------------------------------------- tempo
@@ -690,5 +829,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_SORT = "sort_mode"
         const val KEY_ORDERS = "custom_orders"
         const val PREVIEW_TAIL_MS = 3000L
+        const val SCRUB_SEEK_INTERVAL_MS = 45L
+        const val SCRUB_SILENCE_MS = 150L
+        const val SEEK_HOLD_TICK_MS = 130L
+        const val SEEK_HOLD_START_JUMP_MS = 400L
+        const val SEEK_HOLD_MAX_JUMP_MS = 3000L
     }
 }
